@@ -1,11 +1,88 @@
-// PDF to Text Converter - Frontend JavaScript
+// ── Usage Tracker (localStorage-backed, GPT-4o Vision pricing) ──
+class UsageTracker {
+    constructor() {
+        this.STORAGE_KEY = 'wtf_usage';
+        // GPT-4o pricing (2025)
+        this.PRICING = {
+            inputPerMillion: 2.50,
+            outputPerMillion: 10.00,
+            tokensPerPageInput: 1105, // Vision high-detail: 85 base + 170 * ~6 tiles
+            tokensPerPageOutput: 500, // Estimated extracted text per page
+            bytesPerPage: 150 * 1024 // ~150KB per PDF page (rough heuristic)
+        };
+        this.data = this.load();
+        this.lastConvCost = 0;
+    }
+
+    load() {
+        try {
+            const stored = localStorage.getItem(this.STORAGE_KEY);
+            if (stored) return JSON.parse(stored);
+        } catch (e) { /* ignore */ }
+        return { files: 0, pages: 0, inputTokens: 0, outputTokens: 0, cost: 0 };
+    }
+
+    save() {
+        try {
+            localStorage.setItem(this.STORAGE_KEY, JSON.stringify(this.data));
+        } catch (e) { /* ignore */ }
+    }
+
+    recordConversion(files) {
+        const successful = files.filter(f => f.success);
+        let totalPages = 0;
+
+        for (const file of successful) {
+            const pages = Math.max(1, Math.round(file.size / this.PRICING.bytesPerPage));
+            totalPages += pages;
+        }
+
+        const inputTokens = totalPages * this.PRICING.tokensPerPageInput;
+        const outputTokens = totalPages * this.PRICING.tokensPerPageOutput;
+        const cost = (inputTokens * this.PRICING.inputPerMillion +
+                      outputTokens * this.PRICING.outputPerMillion) / 1_000_000;
+
+        this.data.files += successful.length;
+        this.data.pages += totalPages;
+        this.data.inputTokens += inputTokens;
+        this.data.outputTokens += outputTokens;
+        this.data.cost += cost;
+        this.lastConvCost = cost;
+
+        this.save();
+        return { pages: totalPages, inputTokens, outputTokens, cost };
+    }
+
+    formatTokens(n) {
+        if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+        if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+        return String(n);
+    }
+
+    getStats() {
+        return {
+            files: this.data.files,
+            pages: this.data.pages,
+            tokens: this.formatTokens(this.data.inputTokens + this.data.outputTokens),
+            cost: this.data.cost.toFixed(2)
+        };
+    }
+
+    getLastConversionCost() {
+        return this.lastConvCost;
+    }
+}
+
+// ── PDF to Text Converter — Frontend JavaScript ──
 class PDFConverter {
     constructor() {
         this.files = [];
         this.currentJobId = null;
         this.conversionResults = [];
+        this.usageTracker = new UsageTracker();
         this.initializeElements();
         this.attachEventListeners();
+        this.updateUsageDisplay();
     }
 
     initializeElements() {
@@ -13,33 +90,34 @@ class PDFConverter {
         this.uploadArea = document.getElementById('uploadArea');
         this.fileInput = document.getElementById('fileInput');
         this.browseBtn = document.getElementById('browseBtn');
-        
+
         // Section elements
         this.fileListSection = document.getElementById('fileListSection');
         this.fileList = document.getElementById('fileList');
         this.progressSection = document.getElementById('progressSection');
         this.resultsSection = document.getElementById('resultsSection');
         this.errorSection = document.getElementById('errorSection');
-        
+
         // Progress elements
         this.progressFill = document.getElementById('progressFill');
         this.progressText = document.getElementById('progressText');
         this.statusMessages = document.getElementById('statusMessages');
-        
+
         // Button elements
         this.convertBtn = document.getElementById('convertBtn');
         this.clearBtn = document.getElementById('clearBtn');
         this.downloadAllBtn = document.getElementById('downloadAllBtn');
         this.newConversionBtn = document.getElementById('newConversionBtn');
         this.retryBtn = document.getElementById('retryBtn');
-        
+        this.addMoreBtn = document.getElementById('addMoreBtn');
+
         // Results elements
         this.resultsSummary = document.getElementById('resultsSummary');
         this.individualDownloads = document.getElementById('individualDownloads');
-        
+
         // Error elements
         this.errorMessage = document.getElementById('errorMessage');
-        
+
         // Loading overlay
         this.loadingOverlay = document.getElementById('loadingOverlay');
     }
@@ -48,18 +126,23 @@ class PDFConverter {
         // File upload events
         this.browseBtn.addEventListener('click', () => this.fileInput.click());
         this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e.target.files));
-        
+
         // Drag and drop events
         this.uploadArea.addEventListener('dragover', (e) => this.handleDragOver(e));
         this.uploadArea.addEventListener('dragleave', (e) => this.handleDragLeave(e));
         this.uploadArea.addEventListener('drop', (e) => this.handleFileDrop(e));
-        
+
         // Button events
         this.convertBtn.addEventListener('click', () => this.startConversion());
         this.clearBtn.addEventListener('click', () => this.clearFiles());
         this.downloadAllBtn.addEventListener('click', () => this.downloadAllFiles());
         this.newConversionBtn.addEventListener('click', () => this.resetApplication());
         this.retryBtn.addEventListener('click', () => this.resetApplication());
+
+        // Add more files button
+        if (this.addMoreBtn) {
+            this.addMoreBtn.addEventListener('click', () => this.fileInput.click());
+        }
     }
 
     handleDragOver(e) {
@@ -85,26 +168,22 @@ class PDFConverter {
 
     processFiles(files) {
         const validFiles = files.filter(file => {
-            // Accept any file that ends with .pdf (case insensitive)
             const fileName = file.name.toLowerCase();
             if (!fileName.endsWith('.pdf')) {
                 this.showNotification(`Only PDF files are allowed. ${file.name} was skipped.`, 'error');
                 return false;
             }
-            if (file.size > 100 * 1024 * 1024) { // 100MB limit
+            if (file.size > 100 * 1024 * 1024) {
                 this.showNotification(`File ${file.name} is too large. Maximum size is 100MB.`, 'error');
                 return false;
             }
             return true;
         });
 
-        if (validFiles.length === 0) {
-            return;
-        }
+        if (validFiles.length === 0) return;
 
-        // Add new files, avoiding duplicates
         validFiles.forEach(file => {
-            if (!this.files.some(existingFile => existingFile.name === file.name && existingFile.size === file.size)) {
+            if (!this.files.some(existing => existing.name === file.name && existing.size === file.size)) {
                 this.files.push(file);
             }
         });
@@ -115,7 +194,7 @@ class PDFConverter {
 
     updateFileList() {
         this.fileList.innerHTML = '';
-        
+
         this.files.forEach((file, index) => {
             const fileItem = document.createElement('div');
             fileItem.className = 'file-item fade-in';
@@ -131,10 +210,10 @@ class PDFConverter {
                     <i class="fas fa-times"></i>
                 </button>
             `;
-            
+
             const removeBtn = fileItem.querySelector('.remove-file');
             removeBtn.addEventListener('click', () => this.removeFile(index));
-            
+
             this.fileList.appendChild(fileItem);
         });
     }
@@ -142,7 +221,7 @@ class PDFConverter {
     removeFile(index) {
         this.files.splice(index, 1);
         this.updateFileList();
-        
+
         if (this.files.length === 0) {
             this.showSection('uploadSection');
         }
@@ -155,11 +234,11 @@ class PDFConverter {
     }
 
     formatFileSize(bytes) {
-        if (bytes === 0) return '0 Bytes';
+        if (bytes === 0) return '0 B';
         const k = 1024;
-        const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+        const sizes = ['B', 'KB', 'MB', 'GB'];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
     }
 
     async startConversion() {
@@ -172,13 +251,11 @@ class PDFConverter {
         this.showLoading(true);
 
         try {
-            // Create form data for upload
             const formData = new FormData();
             this.files.forEach(file => {
                 formData.append('pdfs', file);
             });
 
-            // Upload files and start conversion
             const response = await fetch('/api/upload', {
                 method: 'POST',
                 body: formData
@@ -190,8 +267,6 @@ class PDFConverter {
 
             const result = await response.json();
             this.currentJobId = result.jobId;
-
-            // Start polling for progress
             this.pollProgress();
 
         } catch (error) {
@@ -205,7 +280,7 @@ class PDFConverter {
 
         try {
             const response = await fetch(`/api/status/${this.currentJobId}`);
-            
+
             if (!response.ok) {
                 throw new Error(`Status check failed: ${response.statusText}`);
             }
@@ -219,7 +294,6 @@ class PDFConverter {
                 this.showError('Conversion failed. Please try again.');
                 this.showLoading(false);
             } else {
-                // Continue polling
                 setTimeout(() => this.pollProgress(), 1000);
             }
 
@@ -230,12 +304,10 @@ class PDFConverter {
     }
 
     updateProgress(status) {
-        // Update progress bar
         const percentage = status.progress || 0;
         this.progressFill.style.width = `${percentage}%`;
         this.progressText.textContent = `${percentage}%`;
 
-        // Update status messages
         if (status.currentFile) {
             this.addStatusMessage(`Processing: ${status.currentFile}`, 'processing');
         }
@@ -253,11 +325,10 @@ class PDFConverter {
         const messageElement = document.createElement('div');
         messageElement.className = `status-message ${type}`;
         messageElement.textContent = message;
-        
+
         this.statusMessages.appendChild(messageElement);
         this.statusMessages.scrollTop = this.statusMessages.scrollHeight;
 
-        // Remove old messages to prevent memory issues
         if (this.statusMessages.children.length > 50) {
             this.statusMessages.removeChild(this.statusMessages.firstChild);
         }
@@ -266,7 +337,7 @@ class PDFConverter {
     async fetchResults() {
         try {
             const response = await fetch(`/api/results/${this.currentJobId}`);
-            
+
             if (!response.ok) {
                 throw new Error(`Failed to fetch results: ${response.statusText}`);
             }
@@ -285,17 +356,25 @@ class PDFConverter {
         const successful = this.conversionResults.filter(r => r.status === 'success');
         const failed = this.conversionResults.filter(r => r.status === 'error');
 
-        // Show summary
+        // Record usage and calculate cost
+        const fileData = this.files.map(file => {
+            const result = this.conversionResults.find(r => r.originalName === file.name);
+            return { size: file.size, success: result?.status === 'success' };
+        });
+        const convStats = this.usageTracker.recordConversion(fileData);
+        this.updateUsageDisplay();
+
+        // Compact summary with stats
         this.resultsSummary.innerHTML = `
-            <h3>Conversion Summary</h3>
-            <p><strong>Successfully converted:</strong> ${successful.length} files</p>
-            <p><strong>Failed:</strong> ${failed.length} files</p>
-            <p><strong>Total:</strong> ${this.conversionResults.length} files</p>
+            <span class="result-stat success"><i class="fas fa-check"></i> ${successful.length} converted</span>
+            ${failed.length > 0 ? `<span class="result-stat error"><i class="fas fa-times"></i> ${failed.length} failed</span>` : ''}
+            <span class="result-stat total"><i class="fas fa-file"></i> ${this.conversionResults.length} total</span>
+            <span class="result-stat cost"><i class="fas fa-dollar-sign"></i> $${convStats.cost.toFixed(4)} est.</span>
         `;
 
-        // Show individual downloads
-        this.individualDownloads.innerHTML = '<h3>Individual Downloads</h3>';
-        
+        // Individual downloads
+        this.individualDownloads.innerHTML = '';
+
         successful.forEach(result => {
             const downloadItem = document.createElement('div');
             downloadItem.className = 'download-item fade-in';
@@ -309,18 +388,19 @@ class PDFConverter {
         });
 
         if (failed.length > 0) {
-            const failedSection = document.createElement('div');
-            failedSection.innerHTML = '<h4>Failed Files</h4>';
+            const failedHeader = document.createElement('h4');
+            failedHeader.textContent = 'Failed';
+            this.individualDownloads.appendChild(failedHeader);
+
             failed.forEach(result => {
                 const errorItem = document.createElement('div');
                 errorItem.className = 'download-item';
                 errorItem.innerHTML = `
-                    <span><i class="fas fa-exclamation-triangle" style="color: #dc3545;"></i> ${result.originalName}</span>
-                    <span style="color: #dc3545;">${result.error}</span>
+                    <span><i class="fas fa-exclamation-triangle" style="color: var(--danger);"></i> ${result.originalName}</span>
+                    <span style="color: var(--danger); font-size: 0.7rem;">${result.error}</span>
                 `;
-                failedSection.appendChild(errorItem);
+                this.individualDownloads.appendChild(errorItem);
             });
-            this.individualDownloads.appendChild(failedSection);
         }
 
         this.showSection('resultsSection');
@@ -329,7 +409,7 @@ class PDFConverter {
     async downloadAllFiles() {
         try {
             const response = await fetch(`/api/download/batch/${this.currentJobId}`);
-            
+
             if (!response.ok) {
                 throw new Error(`Failed to create batch download: ${response.statusText}`);
             }
@@ -355,19 +435,15 @@ class PDFConverter {
     }
 
     showSection(sectionId) {
-        // Hide all sections
         const sections = ['uploadSection', 'fileListSection', 'progressSection', 'resultsSection', 'errorSection'];
         sections.forEach(id => {
             const section = document.getElementById(id);
-            if (section) {
-                section.style.display = 'none';
-            }
+            if (section) section.style.display = 'none';
         });
 
-        // Show the requested section
         const targetSection = document.getElementById(sectionId);
         if (targetSection) {
-            targetSection.style.display = 'block';
+            targetSection.style.display = 'flex';
             targetSection.classList.add('fade-in');
         }
     }
@@ -377,30 +453,47 @@ class PDFConverter {
     }
 
     showNotification(message, type = 'info') {
-        // Create a simple notification (could be enhanced with a toast library)
         const notification = document.createElement('div');
         notification.style.cssText = `
             position: fixed;
-            top: 20px;
-            right: 20px;
-            padding: 15px 20px;
-            background: ${type === 'error' ? '#dc3545' : '#28a745'};
-            color: white;
-            border-radius: 8px;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+            top: 16px;
+            right: 16px;
+            padding: 10px 16px;
+            background: ${type === 'error' ? '#7f1d1d' : '#14532d'};
+            color: ${type === 'error' ? '#fca5a5' : '#86efac'};
+            border: 1px solid ${type === 'error' ? '#991b1b' : '#166534'};
+            border-radius: 6px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
             z-index: 1001;
             max-width: 300px;
-            word-wrap: break-word;
+            font-size: 0.8rem;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
         `;
         notification.textContent = message;
         document.body.appendChild(notification);
 
-        // Remove notification after 5 seconds
         setTimeout(() => {
             if (notification.parentNode) {
                 notification.parentNode.removeChild(notification);
             }
-        }, 5000);
+        }, 4000);
+    }
+
+    updateUsageDisplay() {
+        const stats = this.usageTracker.getStats();
+        const el = (id) => document.getElementById(id);
+
+        if (el('statFiles')) el('statFiles').textContent = stats.files;
+        if (el('statPages')) el('statPages').textContent = stats.pages;
+        if (el('statTokens')) el('statTokens').textContent = stats.tokens;
+        if (el('statCost')) el('statCost').textContent = stats.cost;
+
+        // Flash animation on stat pills
+        document.querySelectorAll('.stat-pill').forEach(pill => {
+            pill.classList.remove('updated');
+            void pill.offsetWidth; // force reflow for re-animation
+            pill.classList.add('updated');
+        });
     }
 
     resetApplication() {
@@ -411,30 +504,27 @@ class PDFConverter {
         this.statusMessages.innerHTML = '';
         this.progressFill.style.width = '0%';
         this.progressText.textContent = '0%';
-        
+
         this.showSection('uploadSection');
         this.showLoading(false);
     }
 }
 
-// Initialize the application when DOM is loaded
+// Initialize
 document.addEventListener('DOMContentLoaded', () => {
     new PDFConverter();
 });
 
-// Handle page visibility changes to pause/resume polling
+// Handle page visibility
 document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
-        // Page is hidden, could pause polling to save resources
         console.log('Page hidden - polling paused');
     } else {
-        // Page is visible, resume polling if needed
         console.log('Page visible - polling resumed');
     }
 });
 
-// Handle page unload to clean up resources
+// Handle page unload
 window.addEventListener('beforeunload', () => {
-    // Could notify server about client disconnect
     console.log('Page unloading - cleaning up resources');
 });
