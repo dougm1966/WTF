@@ -1,0 +1,67 @@
+{
+  "name": "pdf-converter",
+  "description": "PDF to Text Converter - Advanced document processing with OCR and AI Vision",
+  "repository": "https://github.com/YOUR_USERNAME/pdf-converter",
+  "logo": "https://via.placeholder.com/512x512/667eea/ffffff?text=PDF+Converter",
+  "keywords": ["pdf", "text-converter", "ocr", "ai-vision", "document-processing"],
+  "env": {
+    "NODE_ENV": "production",
+    "PORT": "3000",
+    "OPENAI_API_KEY": {
+      "description": "OpenAI API key for Vision API text extraction",
+      "required": false,
+      "default": ""
+    },
+    "MAX_FILE_SIZE": {
+      "description": "Maximum file size in bytes (default: 100MB)",
+      "required": false,
+      "default": "104857600"
+    },
+    "MAX_FILES_PER_BATCH": {
+      "description": "Maximum number of files per batch",
+      "required": false,
+      "default": "100"
+    },
+    "CONCURRENT_PROCESSING": {
+      "description": "Number of concurrent PDF processing operations",
+      "required": false,
+      "default": "3"
+    },
+    "LOG_LEVEL": {
+      "description": "Logging level (info, warn, error)",
+      "required": false,
+      "default": "info"
+    }
+  },
+  "ports": {
+    "3000": {
+      "description": "Main application port"
+    }
+  },
+  "volumes": {
+    "/app/uploads": {
+      "description": "Upload directory for PDF files and converted text"
+    },
+    "/app/logs": {
+      "description": "Application logs"
+    }
+  },
+  "healthCheck": {
+    "path": "/health",
+    "interval": 30,
+    "timeout": 10,
+    "retries": 3
+  },
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "deploy": {
+    "restartPolicy": "unless-stopped",
+    "replicas": 1,
+    "resources": {
+      "memory": "1Gi",
+      "cpu": "500m"
+    }
+  }
+}

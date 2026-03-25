@@ -1,0 +1,61 @@
+{
+  "name": "pdf-converter",
+  "version": "1.0.0",
+  "description": "A simple web application to convert PDF files to text documents",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "build": "echo 'No build step required for this project'",
+    "test": "jest",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "docker:build": "docker build -t pdf-converter .",
+    "docker:run": "docker run -p 3000:3000 --env-file .env pdf-converter"
+  },
+  "keywords": [
+    "pdf",
+    "text-converter",
+    "file-processing",
+    "web-app",
+    "nodejs"
+  ],
+  "author": "AI Agent Team",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "multer": "^1.4.5-lts.1",
+    "pdf-parse": "^1.1.1",
+    "fs-extra": "^11.1.1",
+    "cors": "^2.8.5",
+    "helmet": "^7.0.0",
+    "compression": "^1.7.4",
+    "archiver": "^5.3.1",
+    "winston": "^3.10.0",
+    "mime-types": "^2.1.35",
+    "uuid": "^9.0.0",
+    "dotenv": "^16.3.1",
+    "openai": "^4.20.1",
+    "tesseract.js": "^5.0.4",
+    "pdf2pic": "^3.1.1",
+    "sharp": "^0.32.6"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1",
+    "jest": "^29.6.2",
+    "supertest": "^6.3.3",
+    "eslint": "^8.45.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/pdf-converter.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-username/pdf-converter/issues"
+  },
+  "homepage": "https://github.com/your-username/pdf-converter#readme"
+}

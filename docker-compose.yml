@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  pdf-converter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pdf-converter-app
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    env_file:
+      - .env
+    volumes:
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - pdf-converter-network
+
+networks:
+  pdf-converter-network:
+    driver: bridge
+
+volumes:
+  uploads:
+    driver: local
+  logs:
+    driver: local
