@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF to Text Converter</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1><i class="fas fa-file-pdf"></i> PDF to Text Converter</h1>
+            <p>Convert multiple PDF files to text documents instantly</p>
+        </header>
+
+        <main class="main-content">
+            <!-- Upload Section -->
+            <section class="upload-section">
+                <div class="upload-container">
+                    <div class="upload-area" id="uploadArea">
+                        <div class="upload-content">
+                            <i class="fas fa-cloud-upload-alt upload-icon"></i>
+                            <h3>Drag & Drop PDF Files Here</h3>
+                            <p>or click to browse</p>
+                            <button class="browse-btn" id="browseBtn">
+                                <i class="fas fa-folder-open"></i> Choose Files
+                            </button>
+                            <input type="file" id="fileInput" multiple accept=".pdf">
+                        </div>
+                    </div>
+                    
+                    <div class="file-info">
+                        <p><i class="fas fa-info-circle"></i> Supports all PDF files including fillable forms and scanned documents (up to 100MB each)</p>
+                        <p><i class="fas fa-shield-alt"></i> Files are processed securely with OCR and AI Vision when needed</p>
+                        <p><i class="fas fa-brain"></i> Advanced text extraction with multiple methods for maximum accuracy</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- File List Section -->
+            <section class="file-list-section" id="fileListSection" style="display: none;">
+                <h2><i class="fas fa-list"></i> Files to Convert</h2>
+                <div class="file-list" id="fileList"></div>
+                <div class="file-actions">
+                    <button class="btn btn-primary" id="convertBtn">
+                        <i class="fas fa-cogs"></i> Convert All Files
+                    </button>
+                    <button class="btn btn-secondary" id="clearBtn">
+                        <i class="fas fa-trash"></i> Clear All
+                    </button>
+                </div>
+            </section>
+
+            <!-- Progress Section -->
+            <section class="progress-section" id="progressSection" style="display: none;">
+                <h2><i class="fas fa-spinner"></i> Converting Files</h2>
+                <div class="progress-container">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <div class="progress-text" id="progressText">0%</div>
+                </div>
+                <div class="status-messages" id="statusMessages"></div>
+            </section>
+
+            <!-- Results Section -->
+            <section class="results-section" id="resultsSection" style="display: none;">
+                <h2><i class="fas fa-check-circle"></i> Conversion Complete</h2>
+                <div class="results-summary" id="resultsSummary"></div>
+                <div class="download-options">
+                    <button class="btn btn-success" id="downloadAllBtn">
+                        <i class="fas fa-download"></i> Download All (ZIP)
+                    </button>
+                    <button class="btn btn-primary" id="newConversionBtn">
+                        <i class="fas fa-plus"></i> Start New Conversion
+                    </button>
+                </div>
+                <div class="individual-downloads" id="individualDownloads"></div>
+            </section>
+
+            <!-- Error Section -->
+            <section class="error-section" id="errorSection" style="display: none;">
+                <h2><i class="fas fa-exclamation-triangle"></i> Error Occurred</h2>
+                <div class="error-message" id="errorMessage"></div>
+                <button class="btn btn-primary" id="retryBtn">
+                    <i class="fas fa-redo"></i> Try Again
+                </button>
+            </section>
+        </main>
+
+        <footer class="footer">
+            <p>&copy; 2024 PDF to Text Converter | Built with AI Agent Team</p>
+        </footer>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loadingOverlay" style="display: none;">
+        <div class="loading-spinner">
+            <i class="fas fa-spinner fa-spin"></i>
+            <p>Processing...</p>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
