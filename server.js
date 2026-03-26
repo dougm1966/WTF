@@ -324,7 +324,7 @@ app.get('/api/history/export', async (req, res) => {
 
     try {
         const archive = archiver('zip', { zlib: { level: 9 } });
-        res.attachment('wtf-export.zip');
+        res.attachment('pdf2txt-export.zip');
         archive.pipe(res);
 
         for (const file of textFiles) {

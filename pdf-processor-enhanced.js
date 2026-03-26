@@ -22,7 +22,7 @@ class EnhancedPDFProcessor {
             this.openai = new OpenAI({
                 apiKey: options.openRouterApiKey,
                 baseURL: 'https://openrouter.ai/api/v1',
-                defaultHeaders: { 'X-Title': 'WTF PDF Converter' }
+                defaultHeaders: { 'X-Title': 'Pdf2Txt PDF Converter' }
             });
         } else if (options.openaiApiKey) {
             this.model = 'gpt-4o';

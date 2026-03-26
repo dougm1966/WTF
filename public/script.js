@@ -1,7 +1,7 @@
 // ── Usage Tracker (localStorage, OpenRouter/Gemini Flash pricing) ──
 class UsageTracker {
     constructor() {
-        this.STORAGE_KEY = 'wtf_usage';
+        this.STORAGE_KEY = 'pdf2txt_usage';
         this.PRICING = {
             inputPerMillion: 0.10,
             outputPerMillion: 0.40,
