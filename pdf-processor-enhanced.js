@@ -51,9 +51,13 @@ class EnhancedPDFProcessor {
             // Determine page count first
             const { stdout } = await execFileAsync('gs', [
                 '-q', '-dNODISPLAY', '-dNOSAFER',
-                '-c', `(${filePath.replace(/\\/g, '/')}) (r) file runpdfbegin pdfpagecount = quit`
+                '-c', `(${filePath.replace(/\\/g, '/').replace(/([()])/g, '\\$1')}) (r) file runpdfbegin pdfpagecount = quit`
             ]);
-            const totalPages = parseInt(stdout.trim()) || 1;
+            const parsedPages = parseInt(stdout.trim());
+            if (!parsedPages || parsedPages < 1) {
+                this.logger.warn(`[ImageConvert] Page count command returned "${stdout.trim()}", defaulting to 1`);
+            }
+            const totalPages = (parsedPages && parsedPages > 0) ? parsedPages : 1;
             const pagesToConvert = maxPages ? Math.min(totalPages, maxPages) : totalPages;
 
             this.logger.info(`[ImageConvert] Converting ${pagesToConvert}/${totalPages} pages at ${density} DPI`);
@@ -96,9 +100,18 @@ class EnhancedPDFProcessor {
         } catch (error) {
             throw new Error(`PDF to image conversion failed: ${error.message}`);
         } finally {
-            // Clean up temp files
-            for (const f of createdFiles) {
-                await fs.remove(f).catch(() => {});
+            // Clean up all temp files matching this prefix (not just expected ones)
+            try {
+                const dir = path.dirname(prefix);
+                const base = path.basename(prefix);
+                const allFiles = await fs.readdir(dir);
+                for (const f of allFiles) {
+                    if (f.startsWith(base)) {
+                        await fs.remove(path.join(dir, f)).catch(() => {});
+                    }
+                }
+            } catch (e) {
+                // Temp cleanup failure is non-fatal
             }
         }
     }
@@ -136,15 +149,18 @@ class EnhancedPDFProcessor {
 
                 if (!response.ok) {
                     const errorText = await response.text().catch(() => 'unknown');
-                    const retryable = [429, 500, 502, 503, 504].includes(response.status);
+                    const status = response.status;
+                    const retryable = [429, 500, 502, 503, 504].includes(status);
 
                     if (retryable && attempt < maxRetries) {
                         const delay = Math.min(1000 * Math.pow(2, attempt), 10000) + Math.random() * 500;
-                        this.logger.warn(`[Vision] Page ${pageNum} API ${response.status}, retry ${attempt + 1}/${maxRetries} in ${Math.round(delay)}ms`);
+                        this.logger.warn(`[Vision] Page ${pageNum} API ${status}, retry ${attempt + 1}/${maxRetries} in ${Math.round(delay)}ms`);
                         await new Promise(r => setTimeout(r, delay));
                         continue;
                     }
-                    throw new Error(`API ${response.status}: ${errorText.substring(0, 200)}`);
+                    const err = new Error(`API ${status}: ${errorText.substring(0, 200)}`);
+                    err.status = status;
+                    throw err;
                 }
 
                 const data = await response.json();
@@ -155,7 +171,8 @@ class EnhancedPDFProcessor {
                 };
 
             } catch (error) {
-                if (attempt < maxRetries && error.name !== 'AbortError' && !error.message.startsWith('API 4')) {
+                const isClientError = error.status && error.status >= 400 && error.status < 500 && error.status !== 429;
+                if (attempt < maxRetries && error.name !== 'AbortError' && !isClientError) {
                     const delay = Math.min(1000 * Math.pow(2, attempt), 10000) + Math.random() * 500;
                     this.logger.warn(`[Vision] Page ${pageNum} error "${error.message}", retry ${attempt + 1}/${maxRetries} in ${Math.round(delay)}ms`);
                     await new Promise(r => setTimeout(r, delay));
