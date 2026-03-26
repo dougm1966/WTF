@@ -5,6 +5,8 @@ FROM node:18-alpine
 RUN apk add --no-cache \
     tesseract-ocr \
     tesseract-ocr-data-eng \
+    graphicsmagick \
+    ghostscript \
     libpng-dev \
     libjpeg-turbo-dev \
     libwebp-dev \
