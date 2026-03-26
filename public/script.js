@@ -56,6 +56,11 @@ class UsageTracker {
         return String(n);
     }
 
+    reset() {
+        this.data = { files: 0, pages: 0, inputTokens: 0, outputTokens: 0, cost: 0 };
+        this.save();
+    }
+
     getStats() {
         return {
             files: this.data.files,
@@ -107,6 +112,7 @@ class PDFConverter {
         this.clearAllBtn = document.getElementById('clearAllBtn');
         this.newConversionBtn = document.getElementById('newConversionBtn');
         this.retryBtn = document.getElementById('retryBtn');
+        this.resetStatsBtn = document.getElementById('resetStats');
 
         this.loadingOverlay = document.getElementById('loadingOverlay');
 
@@ -151,6 +157,7 @@ class PDFConverter {
         if (this.clearAllBtn) this.clearAllBtn.addEventListener('click', () => this.clearFiles());
         this.newConversionBtn.addEventListener('click', () => this.resetApp());
         this.retryBtn.addEventListener('click', () => this.resetApp());
+        this.resetStatsBtn.addEventListener('click', () => { this.usageTracker.reset(); this.updateStats(); });
     }
 
     // ── Drag & Drop ──

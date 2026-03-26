@@ -223,6 +223,29 @@ body {
 }
 .stat-chip.updated { animation: chipFlash 0.7s ease; }
 
+.stat-reset {
+    background: rgba(255,255,255,0.12);
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 50%;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: rgba(255,255,255,0.7);
+    font-size: 0.65rem;
+    transition: background 0.2s ease, color 0.2s ease;
+    align-self: center;
+}
+.stat-reset:hover {
+    background: rgba(255,255,255,0.25);
+    color: white;
+}
+.stat-reset:active {
+    background: rgba(255,255,255,0.35);
+}
+
 /* ── Two-Column Layout ── */
 .columns {
     flex: 1;

@@ -143,3 +143,15 @@ tests/
 __tests__/
 *.test.js
 *.spec.js
+
+# Screenshots and images
+*.png
+*.jpg
+*.jpeg
+temporary screenshots/
+
+# Claude Code
+.claude/
+
+# Local data
+data/
