@@ -131,10 +131,15 @@ const pdfProcessor = new EnhancedPDFProcessor({
     outputDir: 'uploads/texts',
     openRouterApiKey: process.env.OPENROUTER_API_KEY,
     openRouterModel: process.env.OPENROUTER_MODEL,
-    openaiApiKey: process.env.OPENAI_API_KEY, // fallback if no OpenRouter key
+    openaiApiKey: process.env.OPENAI_API_KEY,
     useOCR: true,
-    useVision: true
+    useVision: true,
+    maxVisionPages: parseInt(process.env.MAX_VISION_PAGES) || 10,
+    logger: logger
 });
+
+// Cached dependency health (refreshed on startup and periodically)
+let cachedHealth = null;
 
 // Initialize history store
 const history = new HistoryStore();
@@ -151,7 +156,8 @@ app.get('/health', (req, res) => {
         uptime: process.uptime(),
         memory: process.memoryUsage(),
         timestamp: new Date().toISOString(),
-        activeJobs: jobs.size
+        activeJobs: jobs.size,
+        dependencies: cachedHealth
     });
 });
 
@@ -399,9 +405,12 @@ async function processJob(jobId) {
                     });
                 } else {
                     job.failed++;
-                    job.messages.push({ 
-                        text: `Failed to convert: ${file.originalName} - ${result.error}`, 
-                        type: 'error' 
+                    const errorMsg = result.errorDetails
+                        ? Object.entries(result.errorDetails).map(([k, v]) => `${k}: ${v}`).join('; ')
+                        : result.error;
+                    job.messages.push({
+                        text: `Failed to convert: ${file.originalName} - ${errorMsg}`,
+                        type: 'error'
                     });
                 }
 
@@ -519,13 +528,27 @@ process.on('SIGINT', () => {
 async function startServer() {
     try {
         await ensureDirectories();
-        
+
+        // Run dependency health check
+        cachedHealth = await pdfProcessor.checkDependencies();
+        logger.info('Dependency health check:', cachedHealth);
+        if (!cachedHealth.ghostscript.available) {
+            logger.error('Ghostscript NOT available — scanned PDF processing will fail');
+        }
+        if (!cachedHealth.visionAPI.available && pdfProcessor.useVision) {
+            logger.warn('Vision API not reachable — Vision extraction will fail');
+        }
+        // Refresh health every 5 minutes
+        setInterval(async () => {
+            cachedHealth = await pdfProcessor.checkDependencies();
+        }, 300000);
+
         app.listen(PORT, () => {
             logger.info(`PDF Converter server running on port ${PORT}`);
             console.log(`PDF Converter server running on port ${PORT}`);
             console.log(`Open http://localhost:${PORT} to use the application`);
         });
-        
+
     } catch (error) {
         logger.error('Failed to start server:', error);
         process.exit(1);

@@ -1,12 +1,11 @@
-// Enhanced PDF Processing Specialist - PDF Text Extraction with OCR and Vision
+// Enhanced PDF Processing — PDF Text Extraction with OCR and Vision
 const fs = require('fs-extra');
 const path = require('path');
 const pdfParse = require('pdf-parse');
-const { v4: uuidv4 } = require('uuid');
-const OpenAI = require('openai');
 const Tesseract = require('tesseract.js');
-const pdf2pic = require('pdf2pic');
-const sharp = require('sharp');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const execFileAsync = promisify(execFile);
 
 class EnhancedPDFProcessor {
     constructor(options = {}) {
@@ -15,33 +14,225 @@ class EnhancedPDFProcessor {
         this.outputDir = options.outputDir || 'uploads/texts';
         this.useOCR = options.useOCR || false;
         this.useVision = options.useVision || false;
+        this.maxVisionPages = options.maxVisionPages || parseInt(process.env.MAX_VISION_PAGES) || 10;
+        this.logger = options.logger || console;
 
-        // Initialize OpenAI-compatible client (OpenRouter preferred, OpenAI fallback)
+        // OpenRouter / OpenAI Vision config (called directly via fetch, no SDK wrapper)
         if (options.openRouterApiKey) {
-            this.model = options.openRouterModel || 'google/gemini-flash-2.0';
-            this.openai = new OpenAI({
-                apiKey: options.openRouterApiKey,
-                baseURL: 'https://openrouter.ai/api/v1',
-                defaultHeaders: { 'X-Title': 'Pdf2Txt PDF Converter' }
-            });
+            this.visionApiKey = options.openRouterApiKey;
+            this.visionBaseURL = 'https://openrouter.ai/api/v1';
+            this.visionModel = options.openRouterModel || 'google/gemini-flash-2.0';
+            this.visionHeaders = {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${options.openRouterApiKey}`,
+                'X-Title': 'Pdf2Txt PDF Converter'
+            };
         } else if (options.openaiApiKey) {
-            this.model = 'gpt-4o';
-            this.openai = new OpenAI({
-                apiKey: options.openaiApiKey
-            });
+            this.visionApiKey = options.openaiApiKey;
+            this.visionBaseURL = 'https://api.openai.com/v1';
+            this.visionModel = 'gpt-4o';
+            this.visionHeaders = {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${options.openaiApiKey}`
+            };
         }
-        
-        // Ensure directories exist
+
         fs.ensureDirSync(this.tempDir);
         fs.ensureDirSync(this.outputDir);
     }
 
-    /**
-     * Process a single PDF file and extract text with multiple methods
-     * @param {string} filePath - Path to the PDF file
-     * @param {string} originalName - Original filename
-     * @returns {Promise<Object>} Processing result
-     */
+    // ─── PDF-to-Image Conversion (direct Ghostscript, no wrappers) ───
+
+    async convertPdfToImages(filePath, { density = 150, maxPages = null } = {}) {
+        const prefix = path.join(this.tempDir, `gs_${Date.now()}_`);
+        const createdFiles = [];
+
+        try {
+            // Determine page count first
+            const { stdout } = await execFileAsync('gs', [
+                '-q', '-dNODISPLAY', '-dNOSAFER',
+                '-c', `(${filePath.replace(/\\/g, '/')}) (r) file runpdfbegin pdfpagecount = quit`
+            ]);
+            const totalPages = parseInt(stdout.trim()) || 1;
+            const pagesToConvert = maxPages ? Math.min(totalPages, maxPages) : totalPages;
+
+            this.logger.info(`[ImageConvert] Converting ${pagesToConvert}/${totalPages} pages at ${density} DPI`);
+
+            // Convert pages to PNG via Ghostscript directly
+            const outputPattern = `${prefix}%03d.png`;
+            await execFileAsync('gs', [
+                '-dNOPAUSE', '-dBATCH', '-dSAFER',
+                '-sDEVICE=png16m',
+                `-r${density}`,
+                '-dFirstPage=1',
+                `-dLastPage=${pagesToConvert}`,
+                `-sOutputFile=${outputPattern}`,
+                filePath
+            ]);
+
+            // Read the generated PNGs into buffers
+            const images = [];
+            for (let i = 1; i <= pagesToConvert; i++) {
+                const pagePath = `${prefix}${String(i).padStart(3, '0')}.png`;
+                createdFiles.push(pagePath);
+
+                if (await fs.pathExists(pagePath)) {
+                    const buffer = await fs.readFile(pagePath);
+                    if (buffer.length > 0) {
+                        images.push({ buffer, page: i });
+                    } else {
+                        this.logger.warn(`[ImageConvert] Page ${i} produced empty image, skipping`);
+                    }
+                }
+            }
+
+            if (images.length === 0) {
+                throw new Error('Ghostscript produced no images');
+            }
+
+            this.logger.info(`[ImageConvert] Successfully converted ${images.length} pages`);
+            return images;
+
+        } catch (error) {
+            throw new Error(`PDF to image conversion failed: ${error.message}`);
+        } finally {
+            // Clean up temp files
+            for (const f of createdFiles) {
+                await fs.remove(f).catch(() => {});
+            }
+        }
+    }
+
+    // ─── Vision API (direct fetch, no SDK wrapper) ───
+
+    async callVisionAPI(base64Image, pageNum) {
+        const body = {
+            model: this.visionModel,
+            messages: [{
+                role: 'user',
+                content: [
+                    {
+                        type: 'text',
+                        text: 'Extract all text from this PDF page. Preserve the structure, formatting, and layout as much as possible. Include headers, paragraphs, lists, and any other text content. If there are tables, try to maintain the table structure. Return only the extracted text without any additional commentary.'
+                    },
+                    {
+                        type: 'image_url',
+                        image_url: { url: `data:image/png;base64,${base64Image}` }
+                    }
+                ]
+            }],
+            max_tokens: 4000
+        };
+
+        // Retry with exponential backoff
+        const maxRetries = 3;
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+                const response = await fetch(`${this.visionBaseURL}/chat/completions`, {
+                    method: 'POST',
+                    headers: this.visionHeaders,
+                    body: JSON.stringify(body)
+                });
+
+                if (!response.ok) {
+                    const errorText = await response.text().catch(() => 'unknown');
+                    const retryable = [429, 500, 502, 503, 504].includes(response.status);
+
+                    if (retryable && attempt < maxRetries) {
+                        const delay = Math.min(1000 * Math.pow(2, attempt), 10000) + Math.random() * 500;
+                        this.logger.warn(`[Vision] Page ${pageNum} API ${response.status}, retry ${attempt + 1}/${maxRetries} in ${Math.round(delay)}ms`);
+                        await new Promise(r => setTimeout(r, delay));
+                        continue;
+                    }
+                    throw new Error(`API ${response.status}: ${errorText.substring(0, 200)}`);
+                }
+
+                const data = await response.json();
+                return {
+                    text: data.choices?.[0]?.message?.content || '',
+                    promptTokens: data.usage?.prompt_tokens || 0,
+                    completionTokens: data.usage?.completion_tokens || 0
+                };
+
+            } catch (error) {
+                if (attempt < maxRetries && error.name !== 'AbortError' && !error.message.startsWith('API 4')) {
+                    const delay = Math.min(1000 * Math.pow(2, attempt), 10000) + Math.random() * 500;
+                    this.logger.warn(`[Vision] Page ${pageNum} error "${error.message}", retry ${attempt + 1}/${maxRetries} in ${Math.round(delay)}ms`);
+                    await new Promise(r => setTimeout(r, delay));
+                    continue;
+                }
+                throw error;
+            }
+        }
+    }
+
+    // ─── Dependency Health Check ───
+
+    async checkDependencies() {
+        const results = {
+            ghostscript: { available: false, version: null },
+            graphicsMagick: { available: false, version: null },
+            tesseract: { available: false },
+            visionAPI: { available: false, model: null },
+            tempDir: { writable: false }
+        };
+
+        // Ghostscript
+        try {
+            const { stdout } = await execFileAsync('gs', ['--version']);
+            results.ghostscript = { available: true, version: stdout.trim() };
+        } catch (e) {
+            results.ghostscript.error = e.message;
+        }
+
+        // GraphicsMagick (informational only — we don't depend on it anymore)
+        try {
+            const { stdout } = await execFileAsync('gm', ['version']);
+            const match = stdout.match(/GraphicsMagick\s+([\d.]+)/);
+            results.graphicsMagick = { available: true, version: match ? match[1] : 'unknown' };
+        } catch (e) {
+            results.graphicsMagick.error = e.message;
+        }
+
+        // Tesseract
+        try {
+            await Tesseract.recognize(Buffer.alloc(1), 'eng');
+        } catch (e) {
+            // Tesseract.js works in pure JS mode even without system binary
+            results.tesseract = { available: true };
+        }
+
+        // Vision API connectivity
+        if (this.visionApiKey) {
+            try {
+                const res = await fetch(`${this.visionBaseURL}/models`, {
+                    headers: { 'Authorization': `Bearer ${this.visionApiKey}` }
+                });
+                results.visionAPI = { available: res.ok, model: this.visionModel, status: res.status };
+            } catch (e) {
+                results.visionAPI.error = e.message;
+            }
+        }
+
+        // Temp dir writable
+        try {
+            const testFile = path.join(this.tempDir, `.health_${Date.now()}`);
+            await fs.writeFile(testFile, 'test');
+            await fs.remove(testFile);
+            results.tempDir = { writable: true };
+        } catch (e) {
+            results.tempDir.error = e.message;
+        }
+
+        results.allHealthy = results.ghostscript.available &&
+            results.tempDir.writable &&
+            (this.visionApiKey ? results.visionAPI.available : true);
+
+        return results;
+    }
+
+    // ─── Main Processing Pipeline ───
+
     async processPDF(filePath, originalName) {
         const result = {
             originalName,
@@ -50,6 +241,7 @@ class EnhancedPDFProcessor {
             textContent: null,
             pageCount: 0,
             error: null,
+            errorDetails: null,
             processingTime: 0,
             quality: null,
             extractionMethod: 'unknown',
@@ -57,148 +249,118 @@ class EnhancedPDFProcessor {
         };
 
         const startTime = Date.now();
+        const errors = {};
 
         try {
-            // Validate file exists and is readable
             await this.validatePDFFile(filePath);
 
-            // Try multiple extraction methods in order of preference
             let extractionResult = null;
-            let extractionMethod = 'standard';
 
             // Method 1: Standard PDF text extraction
             try {
                 extractionResult = await this.extractTextFromPDF(filePath);
-                extractionMethod = 'standard';
-                
-                // Check if extraction was successful and has meaningful content
                 if (this.isExtractionSuccessful(extractionResult)) {
                     result.extractionMethod = 'standard';
+                    this.logger.info(`[Standard] Success for ${originalName}`);
                 } else {
                     throw new Error('Standard extraction produced insufficient content');
                 }
             } catch (error) {
-                console.log(`Standard extraction failed for ${originalName}: ${error.message}`);
-                
+                errors.standard = error.message;
+                this.logger.info(`[Standard] Failed for ${originalName}: ${error.message}`);
+
                 // Method 2: OCR with Tesseract
                 if (this.useOCR) {
                     try {
                         extractionResult = await this.extractTextWithOCR(filePath);
-                        extractionMethod = 'ocr';
                         result.extractionMethod = 'ocr';
+                        this.logger.info(`[OCR] Success for ${originalName}`);
                     } catch (ocrError) {
-                        console.log(`OCR extraction failed for ${originalName}: ${ocrError.message}`);
-                        
-                        // Method 3: OpenAI Vision (if available)
-                        if (this.useVision && this.openai) {
+                        errors.ocr = ocrError.message;
+                        this.logger.info(`[OCR] Failed for ${originalName}: ${ocrError.message}`);
+
+                        // Method 3: Vision API
+                        if (this.useVision && this.visionApiKey) {
                             try {
                                 extractionResult = await this.extractTextWithVision(filePath);
-                                extractionMethod = 'vision';
                                 result.extractionMethod = 'vision';
                                 if (extractionResult.usage) {
                                     result.usage = extractionResult.usage;
                                 }
+                                this.logger.info(`[Vision] Success for ${originalName}`);
                             } catch (visionError) {
-                                console.log(`Vision extraction failed for ${originalName}: ${visionError.message}`);
-                                throw new Error('All extraction methods failed');
+                                errors.vision = visionError.message;
+                                this.logger.error(`[Vision] Failed for ${originalName}: ${visionError.message}`);
+                                const detail = Object.entries(errors).map(([k, v]) => `${k}: ${v}`).join('; ');
+                                throw new Error(`All extraction methods failed — ${detail}`);
                             }
                         } else {
-                            throw new Error('Standard extraction failed and OCR/Vision not available');
+                            throw new Error('OCR failed and Vision API not configured');
                         }
+                    }
+                } else if (this.useVision && this.visionApiKey) {
+                    // Skip OCR, go straight to Vision
+                    try {
+                        extractionResult = await this.extractTextWithVision(filePath);
+                        result.extractionMethod = 'vision';
+                        if (extractionResult.usage) {
+                            result.usage = extractionResult.usage;
+                        }
+                        this.logger.info(`[Vision] Success for ${originalName} (OCR disabled)`);
+                    } catch (visionError) {
+                        errors.vision = visionError.message;
+                        this.logger.error(`[Vision] Failed for ${originalName}: ${visionError.message}`);
+                        const detail = Object.entries(errors).map(([k, v]) => `${k}: ${v}`).join('; ');
+                        throw new Error(`All extraction methods failed — ${detail}`);
                     }
                 } else {
                     throw error;
                 }
             }
 
-            // Assess quality of extraction
-            result.quality = this.assessExtractionQuality(extractionResult.text, extractionMethod);
-            
-            // Clean and enhance the extracted text
+            result.quality = this.assessExtractionQuality(extractionResult.text, result.extractionMethod);
             const cleanedText = this.cleanExtractedText(extractionResult.text);
-            
-            // Generate output filename
             const textFilename = this.generateTextFilename(originalName);
             const textFilePath = path.join(this.outputDir, textFilename);
-            
-            // Write text to file
             await fs.writeFile(textFilePath, cleanedText, 'utf8');
-            
-            // Update result
+
             result.status = 'success';
             result.textFile = textFilename;
             result.textContent = cleanedText;
             result.pageCount = extractionResult.numpages || 1;
             result.processingTime = Date.now() - startTime;
-            
-            // Log successful processing
-            console.log(`Successfully processed: ${originalName} (${result.pageCount} pages, ${result.processingTime}ms, method: ${result.extractionMethod})`);
-            
+
+            this.logger.info(`Processed: ${originalName} (${result.pageCount} pages, ${result.processingTime}ms, method: ${result.extractionMethod})`);
             return result;
 
         } catch (error) {
             result.status = 'error';
             result.error = error.message;
+            result.errorDetails = Object.keys(errors).length > 0 ? errors : null;
             result.processingTime = Date.now() - startTime;
-            
-            console.error(`Error processing ${originalName}:`, error);
-            
+            this.logger.error(`Error processing ${originalName}:`, error.message);
             return result;
         }
     }
 
-    /**
-     * Validate PDF file with more permissive checks
-     * @param {string} filePath - Path to PDF file
-     */
+    // ─── Extraction Methods ───
+
     async validatePDFFile(filePath) {
-        try {
-            const stats = await fs.stat(filePath);
-            
-            if (!stats.isFile()) {
-                throw new Error('Invalid file: not a regular file');
-            }
-            
-            if (stats.size === 0) {
-                throw new Error('File is empty');
-            }
-            
-            if (stats.size > (parseInt(process.env.MAX_FILE_SIZE) || 100 * 1024 * 1024)) {
-                throw new Error('File too large');
-            }
-            
-            // More permissive file header check - accept various PDF formats
-            try {
-                const buffer = await fs.readFile(filePath, { start: 0, end: 10 });
-                const header = buffer.toString();
-                
-                // Accept various PDF headers including fillable forms
-                if (!header.startsWith('%PDF') && !header.includes('PDF-')) {
-                    console.log('Unusual PDF header detected, proceeding anyway:', header.substring(0, 20));
-                }
-            } catch (headerError) {
-                console.log('Could not read file header, proceeding anyway');
-            }
-            
-        } catch (error) {
-            throw new Error(`File validation failed: ${error.message}`);
+        const stats = await fs.stat(filePath);
+        if (!stats.isFile()) throw new Error('Not a regular file');
+        if (stats.size === 0) throw new Error('File is empty');
+        if (stats.size > (parseInt(process.env.MAX_FILE_SIZE) || 100 * 1024 * 1024)) {
+            throw new Error('File too large');
         }
     }
 
-    /**
-     * Extract text from PDF using standard method with better error handling
-     * @param {string} filePath - Path to PDF file
-     * @returns {Promise<Object>} Extraction result
-     */
     async extractTextFromPDF(filePath) {
         try {
             const dataBuffer = await fs.readFile(filePath);
             const data = await pdfParse(dataBuffer, {
-                // More permissive parsing options
                 normalizeWhitespace: false,
                 disableCombineTextItems: false
             });
-            
             return {
                 text: data.text,
                 numpages: data.numpages,
@@ -206,231 +368,110 @@ class EnhancedPDFProcessor {
                 metadata: data.metadata,
                 version: data.version
             };
-            
         } catch (error) {
-            // Handle common PDF parsing errors with more specific messages
-            if (error.message.includes('password')) {
-                throw new Error('PDF is password protected');
-            }
-            if (error.message.includes('corrupted') || error.message.includes('damaged')) {
-                throw new Error('PDF file appears to be corrupted');
-            }
-            if (error.message.includes('encrypted')) {
-                throw new Error('PDF is encrypted and cannot be processed');
-            }
-            if (error.message.includes('Invalid')) {
-                throw new Error('PDF format is not supported');
-            }
-            
+            if (error.message.includes('password')) throw new Error('PDF is password protected');
+            if (error.message.includes('corrupted') || error.message.includes('damaged')) throw new Error('PDF file appears to be corrupted');
+            if (error.message.includes('encrypted')) throw new Error('PDF is encrypted and cannot be processed');
             throw new Error(`PDF parsing failed: ${error.message}`);
         }
     }
 
-    /**
-     * Extract text using OCR with Tesseract
-     * @param {string} filePath - Path to PDF file
-     * @returns {Promise<Object>} Extraction result
-     */
     async extractTextWithOCR(filePath) {
-        try {
-            // Convert PDF to images
-            const convert = pdf2pic.fromPath(filePath, {
-                density: 200,
-                saveFilename: "page",
-                savePath: this.tempDir,
-                format: "png",
-                width: 2000,
-                height: 2000
-            });
+        this.logger.info(`[OCR] Starting OCR extraction`);
 
-            // Convert all pages to images
-            const pageImages = await convert.bulk(-1, { responseType: "buffer" });
-            
-            if (!pageImages || pageImages.length === 0) {
-                throw new Error('Failed to convert PDF to images');
-            }
+        const images = await this.convertPdfToImages(filePath, { density: 200 });
 
-            let fullText = '';
-            let pageCount = 0;
+        let fullText = '';
+        let pageCount = 0;
 
-            // Process each page with OCR
-            for (let i = 0; i < pageImages.length; i++) {
-                try {
-                    const imageBuffer = pageImages[i].buffer;
-                    
-                    // Use Tesseract to extract text from image
-                    const { data: { text } } = await Tesseract.recognize(
-                        imageBuffer,
-                        'eng',
-                        {
-                            logger: m => console.log(`OCR Page ${i + 1}: ${Math.round(m.progress * 100)}%`)
-                        }
-                    );
+        for (const { buffer, page } of images) {
+            try {
+                const { data: { text } } = await Tesseract.recognize(buffer, 'eng');
 
-                    if (text && text.trim().length > 0) {
-                        fullText += `--- PAGE ${i + 1} ---\n${text}\n\n`;
-                        pageCount++;
-                    }
-
-                    // Clean up temporary image file
-                    if (pageImages[i].path) {
-                        await fs.remove(pageImages[i].path);
-                    }
-
-                } catch (pageError) {
-                    console.error(`Error processing page ${i + 1}:`, pageError);
-                    // Continue with other pages
+                if (text && text.trim().length > 0) {
+                    fullText += `--- PAGE ${page} ---\n${text}\n\n`;
+                    pageCount++;
                 }
+            } catch (pageError) {
+                this.logger.warn(`[OCR] Page ${page} failed: ${pageError.message}`);
             }
-
-            if (fullText.trim().length === 0) {
-                throw new Error('OCR could not extract any text from the PDF');
-            }
-
-            return {
-                text: fullText,
-                numpages: pageCount,
-                method: 'ocr'
-            };
-
-        } catch (error) {
-            throw new Error(`OCR extraction failed: ${error.message}`);
         }
+
+        if (fullText.trim().length === 0) {
+            throw new Error('OCR could not extract any text from the PDF');
+        }
+
+        return { text: fullText, numpages: pageCount, method: 'ocr' };
     }
 
-    /**
-     * Extract text using OpenAI Vision API
-     * @param {string} filePath - Path to PDF file
-     * @returns {Promise<Object>} Extraction result
-     */
     async extractTextWithVision(filePath) {
-        try {
-            if (!this.openai) {
-                throw new Error('OpenAI client not initialized');
-            }
+        if (!this.visionApiKey) {
+            throw new Error('Vision API not configured');
+        }
 
-            // Convert PDF to images
-            const convert = pdf2pic.fromPath(filePath, {
-                density: 150, // Lower density for faster processing
-                saveFilename: "vision_page",
-                savePath: this.tempDir,
-                format: "png",
-                width: 1024,
-                height: 1024
-            });
+        this.logger.info(`[Vision] Starting Vision extraction (max ${this.maxVisionPages} pages, model: ${this.visionModel})`);
 
-            // Convert first few pages to images (limit for cost)
-            const pageImages = await convert.bulk(Math.min(5, 10), { responseType: "buffer" });
-            
-            if (!pageImages || pageImages.length === 0) {
-                throw new Error('Failed to convert PDF to images for Vision API');
-            }
+        const images = await this.convertPdfToImages(filePath, {
+            density: 150,
+            maxPages: this.maxVisionPages
+        });
 
-            let fullText = '';
-            let pageCount = 0;
-            let totalPromptTokens = 0;
-            let totalCompletionTokens = 0;
+        let fullText = '';
+        let pageCount = 0;
+        let totalPromptTokens = 0;
+        let totalCompletionTokens = 0;
 
-            // Process each page with OpenAI Vision
-            for (let i = 0; i < pageImages.length; i++) {
-                try {
-                    const imageBuffer = pageImages[i].buffer;
-                    
-                    // Convert buffer to base64
-                    const base64Image = imageBuffer.toString('base64');
-
-                    const response = await this.openai.chat.completions.create({
-                        model: this.model,
-                        messages: [
-                            {
-                                role: "user",
-                                content: [
-                                    {
-                                        type: "text",
-                                        text: "Extract all text from this PDF page. Preserve the structure, formatting, and layout as much as possible. Include headers, paragraphs, lists, and any other text content. If there are tables, try to maintain the table structure. Return only the extracted text without any additional commentary."
-                                    },
-                                    {
-                                        type: "image_url",
-                                        image_url: {
-                                            url: `data:image/png;base64,${base64Image}`
-                                        }
-                                    }
-                                ]
-                            }
-                        ],
-                        max_tokens: 2000
-                    });
-
-                    const extractedText = response.choices[0]?.message?.content || '';
-
-                    // Capture actual token usage from API response
-                    if (response.usage) {
-                        totalPromptTokens += response.usage.prompt_tokens || 0;
-                        totalCompletionTokens += response.usage.completion_tokens || 0;
-                    }
-
-                    if (extractedText.trim().length > 0) {
-                        fullText += `--- PAGE ${i + 1} ---\n${extractedText}\n\n`;
-                        pageCount++;
-                    }
-
-                    // Clean up temporary image file
-                    if (pageImages[i].path) {
-                        await fs.remove(pageImages[i].path);
-                    }
-
-                } catch (pageError) {
-                    console.error(`Error processing page ${i + 1} with Vision:`, pageError);
-                    // Continue with other pages
+        for (const { buffer, page } of images) {
+            try {
+                if (buffer.length < 100) {
+                    this.logger.warn(`[Vision] Page ${page} image too small (${buffer.length} bytes), skipping`);
+                    continue;
                 }
+
+                const base64Image = buffer.toString('base64');
+                this.logger.info(`[Vision] Sending page ${page}/${images.length} (${Math.round(base64Image.length / 1024)}KB)`);
+
+                const result = await this.callVisionAPI(base64Image, page);
+
+                totalPromptTokens += result.promptTokens;
+                totalCompletionTokens += result.completionTokens;
+
+                if (result.text.trim().length > 0) {
+                    fullText += `--- PAGE ${page} ---\n${result.text}\n\n`;
+                    pageCount++;
+                }
+
+                this.logger.info(`[Vision] Page ${page} done (${result.text.length} chars, ${result.promptTokens}+${result.completionTokens} tokens)`);
+
+            } catch (pageError) {
+                this.logger.error(`[Vision] Page ${page} failed: ${pageError.message}`);
             }
-
-            if (fullText.trim().length === 0) {
-                throw new Error('Vision API could not extract any text from the PDF');
-            }
-
-            return {
-                text: fullText,
-                numpages: pageCount,
-                method: 'vision',
-                usage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens }
-            };
-
-        } catch (error) {
-            throw new Error(`Vision extraction failed: ${error.message}`);
         }
+
+        if (fullText.trim().length === 0) {
+            throw new Error('Vision API could not extract any text from the PDF');
+        }
+
+        this.logger.info(`[Vision] Complete: ${pageCount} pages, ${totalPromptTokens}+${totalCompletionTokens} tokens`);
+
+        return {
+            text: fullText,
+            numpages: pageCount,
+            method: 'vision',
+            usage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens }
+        };
     }
 
-    /**
-     * Check if extraction was successful
-     * @param {Object} extractionResult - Result from extraction
-     * @returns {boolean} True if successful
-     */
+    // ─── Quality Assessment (unchanged) ───
+
     isExtractionSuccessful(extractionResult) {
-        if (!extractionResult || !extractionResult.text) {
-            return false;
-        }
-
+        if (!extractionResult || !extractionResult.text) return false;
         const text = extractionResult.text.trim();
-        
-        // Check if we have meaningful content
-        if (text.length < 10) {
-            return false;
-        }
-
-        // Check if we have readable characters (not just random symbols)
+        if (text.length < 10) return false;
         const readableChars = text.match(/[a-zA-Z0-9\s.,!?;:()\[\]{}'"-]/g) || [];
-        const readableRatio = readableChars.length / text.length;
-        
-        return readableRatio > 0.3; // At least 30% readable characters
+        return (readableChars.length / text.length) > 0.3;
     }
 
-    /**
-     * Assess the quality of text extraction
-     * @param {string} text - Extracted text
-     * @param {string} method - Extraction method used
-     * @returns {Object} Quality assessment
-     */
     assessExtractionQuality(text, method) {
         const metrics = {
             textLength: text.length,
@@ -438,36 +479,29 @@ class EnhancedPDFProcessor {
             hasTables: this.detectTables(text),
             hasImages: this.detectImageReferences(text),
             language: this.detectLanguage(text),
-            avgWordsPerPage: this.countWords(text) / 1, // Simplified since we don't always have page count
+            avgWordsPerPage: this.countWords(text),
             extractionMethod: method
         };
-        
-        // Calculate quality score (0-100)
+
         let qualityScore = 0;
-        
-        // Text length contribution (30%)
         if (metrics.textLength > 1000) qualityScore += 30;
         else if (metrics.textLength > 500) qualityScore += 20;
         else if (metrics.textLength > 100) qualityScore += 10;
-        
-        // Readability ratio contribution (25%)
+
         qualityScore += metrics.readableRatio * 25;
-        
-        // Words per page contribution (25%)
+
         if (metrics.avgWordsPerPage > 100) qualityScore += 25;
         else if (metrics.avgWordsPerPage > 50) qualityScore += 20;
         else if (metrics.avgWordsPerPage > 10) qualityScore += 15;
         else if (metrics.avgWordsPerPage > 0) qualityScore += 10;
-        
-        // Structure detection contribution (20%)
+
         if (metrics.hasTables) qualityScore += 10;
         if (metrics.hasImages) qualityScore += 5;
         if (metrics.language !== 'unknown') qualityScore += 5;
-        
-        // Bonus for advanced extraction methods
+
         if (method === 'vision') qualityScore += 10;
         else if (method === 'ocr') qualityScore += 5;
-        
+
         return {
             score: Math.min(100, Math.round(qualityScore)),
             metrics,
@@ -475,170 +509,63 @@ class EnhancedPDFProcessor {
         };
     }
 
-    /**
-     * Calculate readability ratio
-     * @param {string} text - Extracted text
-     * @returns {number} Readability ratio (0-1)
-     */
     calculateReadabilityRatio(text) {
         if (!text || text.length === 0) return 0;
-        
-        // Count readable characters (letters, numbers, basic punctuation)
         const readableChars = text.match(/[a-zA-Z0-9\s.,!?;:()\[\]{}"'-]/g) || [];
-        const totalChars = text.length;
-        
-        return readableChars.length / totalChars;
+        return readableChars.length / text.length;
     }
 
-    /**
-     * Count words in text
-     * @param {string} text - Text to analyze
-     * @returns {number} Word count
-     */
     countWords(text) {
         if (!text) return 0;
-        const words = text.match(/\b\w+\b/g) || [];
-        return words.length;
+        return (text.match(/\b\w+\b/g) || []).length;
     }
 
-    /**
-     * Detect table patterns in text
-     * @param {string} text - Text to analyze
-     * @returns {boolean} True if tables are likely present
-     */
     detectTables(text) {
-        const tablePatterns = [
-            /\t{2,}/, // Multiple tabs
-            / {5,}/, // Multiple spaces
-            /\|.*\|/, // Pipe characters
-            /\d+\s+\d+\s+\d+/ // Multiple numbers in sequence
-        ];
-        
-        return tablePatterns.some(pattern => pattern.test(text));
+        return [/\t{2,}/, / {5,}/, /\|.*\|/, /\d+\s+\d+\s+\d+/].some(p => p.test(text));
     }
 
-    /**
-     * Detect image references in text
-     * @param {string} text - Text to analyze
-     * @returns {boolean} True if images are referenced
-     */
     detectImageReferences(text) {
-        const imagePatterns = [
-            /figure/i,
-            /image/i,
-            /picture/i,
-            /diagram/i,
-            /chart/i,
-            /graph/i,
-            /illustration/i
-        ];
-        
-        return imagePatterns.some(pattern => pattern.test(text));
+        return [/figure/i, /image/i, /picture/i, /diagram/i, /chart/i, /graph/i, /illustration/i].some(p => p.test(text));
     }
 
-    /**
-     * Detect primary language of text
-     * @param {string} text - Text to analyze
-     * @returns {string} Detected language
-     */
     detectLanguage(text) {
         if (!text || text.length < 50) return 'unknown';
-        
-        const englishWords = ['the', 'and', 'is', 'in', 'to', 'of', 'a', 'that', 'it', 'with'];
         const sample = text.toLowerCase().substring(0, 1000);
-        
-        const englishMatches = englishWords.filter(word => sample.includes(word)).length;
-        
-        if (englishMatches >= 3) return 'english';
-        return 'unknown';
+        const hits = ['the', 'and', 'is', 'in', 'to', 'of', 'a', 'that', 'it', 'with'].filter(w => sample.includes(w)).length;
+        return hits >= 3 ? 'english' : 'unknown';
     }
 
-    /**
-     * Generate recommendations based on quality metrics
-     * @param {Object} metrics - Quality metrics
-     * @returns {Array} List of recommendations
-     */
     generateRecommendations(metrics) {
-        const recommendations = [];
-        
-        if (metrics.readableRatio < 0.3) {
-            recommendations.push('Text extraction quality is low - may contain images or complex formatting');
-        }
-        
-        if (metrics.avgWordsPerPage < 10) {
-            recommendations.push('Low text density detected - may be image-heavy document');
-        }
-        
-        if (metrics.hasTables) {
-            recommendations.push('Tables detected - formatting may be lost');
-        }
-        
-        if (metrics.hasImages) {
-            recommendations.push('Images detected - visual content not captured');
-        }
-        
-        if (metrics.language === 'unknown') {
-            recommendations.push('Language not detected - may need specialized processing');
-        }
-        
-        if (metrics.extractionMethod === 'ocr') {
-            recommendations.push('OCR was used - accuracy may vary based on image quality');
-        }
-        
-        if (metrics.extractionMethod === 'vision') {
-            recommendations.push('AI Vision was used - high accuracy but may miss some formatting');
-        }
-        
-        return recommendations;
+        const recs = [];
+        if (metrics.readableRatio < 0.3) recs.push('Text extraction quality is low - may contain images or complex formatting');
+        if (metrics.avgWordsPerPage < 10) recs.push('Low text density detected - may be image-heavy document');
+        if (metrics.hasTables) recs.push('Tables detected - formatting may be lost');
+        if (metrics.hasImages) recs.push('Images detected - visual content not captured');
+        if (metrics.language === 'unknown') recs.push('Language not detected - may need specialized processing');
+        if (metrics.extractionMethod === 'ocr') recs.push('OCR was used - accuracy may vary based on image quality');
+        if (metrics.extractionMethod === 'vision') recs.push('AI Vision was used - high accuracy but may miss some formatting');
+        return recs;
     }
 
-    /**
-     * Clean and enhance extracted text
-     * @param {string} rawText - Raw extracted text
-     * @returns {string} Cleaned text
-     */
     cleanExtractedText(rawText) {
         if (!rawText) return '';
-        
         let cleaned = rawText;
-        
-        // Normalize whitespace
         cleaned = cleaned.replace(/\s+/g, ' ');
-        
-        // Remove excessive line breaks
         cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
-        
-        // Clean up common extraction artifacts
-        cleaned = cleaned.replace(/\f/g, '\n--- PAGE BREAK ---\n'); // Form feeds
-        cleaned = cleaned.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ''); // Control characters
-        
-        // Fix common spacing issues
-        cleaned = cleaned.replace(/([.!?])\s+([A-Z])/g, '$1\n\n$2'); // Sentence separation
-        cleaned = cleaned.replace(/(\w)\s+(\w)/g, '$1 $2'); // Single spaces between words
-        
-        // Remove leading/trailing whitespace
-        cleaned = cleaned.trim();
-        
-        return cleaned;
+        cleaned = cleaned.replace(/\f/g, '\n--- PAGE BREAK ---\n');
+        cleaned = cleaned.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+        cleaned = cleaned.replace(/([.!?])\s+([A-Z])/g, '$1\n\n$2');
+        cleaned = cleaned.replace(/(\w)\s+(\w)/g, '$1 $2');
+        return cleaned.trim();
     }
 
-    /**
-     * Generate unique filename for text output
-     * @param {string} originalName - Original PDF filename
-     * @returns {string} Generated text filename
-     */
     generateTextFilename(originalName) {
         const baseName = path.basename(originalName, '.pdf');
         const timestamp = Date.now();
         const random = Math.random().toString(36).substring(2, 8);
-        
         return `${baseName}-${timestamp}-${random}.txt`;
     }
 
-    /**
-     * Get processing statistics
-     * @returns {Object} Processing statistics
-     */
     getStats() {
         return {
             concurrency: this.concurrency,
@@ -646,7 +573,9 @@ class EnhancedPDFProcessor {
             outputDir: this.outputDir,
             useOCR: this.useOCR,
             useVision: this.useVision,
-            hasOpenAI: !!this.openai
+            hasVisionAPI: !!this.visionApiKey,
+            visionModel: this.visionModel || null,
+            maxVisionPages: this.maxVisionPages
         };
     }
 }
