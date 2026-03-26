@@ -104,6 +104,12 @@ class PDFConverter {
 
         this.loadingOverlay = document.getElementById('loadingOverlay');
 
+        // Landing page
+        this.landingView = document.getElementById('landingView');
+        this.workingView = document.getElementById('workingView');
+        this.landingDrop = document.getElementById('landingDrop');
+        this.landingBrowseBtn = document.getElementById('landingBrowseBtn');
+
         // Preview
         this.previewEmpty = document.getElementById('previewEmpty');
         this.previewContent = document.getElementById('previewContent');
@@ -118,6 +124,20 @@ class PDFConverter {
         this.uploadArea.addEventListener('dragover', e => this.handleDragOver(e));
         this.uploadArea.addEventListener('dragleave', e => this.handleDragLeave(e));
         this.uploadArea.addEventListener('drop', e => this.handleFileDrop(e));
+
+        // Landing page events
+        if (this.landingBrowseBtn) {
+            this.landingBrowseBtn.addEventListener('click', () => this.fileInput.click());
+        }
+        if (this.landingDrop) {
+            this.landingDrop.addEventListener('dragover', e => { e.preventDefault(); this.landingDrop.classList.add('dragover'); });
+            this.landingDrop.addEventListener('dragleave', e => { e.preventDefault(); this.landingDrop.classList.remove('dragover'); });
+            this.landingDrop.addEventListener('drop', e => {
+                e.preventDefault();
+                this.landingDrop.classList.remove('dragover');
+                this.processFiles(Array.from(e.dataTransfer.files));
+            });
+        }
 
         this.convertBtn.addEventListener('click', () => this.startConversion());
         this.clearBtn.addEventListener('click', () => this.clearFiles());
@@ -153,10 +173,17 @@ class PDFConverter {
         });
         if (!valid.length) return;
 
+        const wasEmpty = this.files.length === 0;
+
         valid.forEach(f => {
             if (!this.files.some(x => x.name === f.name && x.size === f.size))
                 this.files.push(f);
         });
+
+        // Switch from landing to working view on first file
+        if (wasEmpty && this.files.length > 0) {
+            this.showWorkingView();
+        }
 
         this.renderFileList();
         this.fileInput.value = '';
@@ -208,8 +235,7 @@ class PDFConverter {
     removeFile(i) {
         this.files.splice(i, 1);
         if (!this.files.length) {
-            this.fileArea.style.display = 'none';
-            this.actionBar.style.display = 'none';
+            this.showLandingView();
         }
         this.renderFileList();
     }
@@ -224,6 +250,17 @@ class PDFConverter {
         this.resultsBar.style.display = 'none';
         this.errorArea.style.display = 'none';
         this.hidePreview();
+        this.showLandingView();
+    }
+
+    showWorkingView() {
+        if (this.landingView) this.landingView.style.display = 'none';
+        if (this.workingView) this.workingView.style.display = 'grid';
+    }
+
+    showLandingView() {
+        if (this.landingView) this.landingView.style.display = 'flex';
+        if (this.workingView) this.workingView.style.display = 'none';
     }
 
     fmtSize(b) {
@@ -466,6 +503,7 @@ class PDFConverter {
         this.errorArea.style.display = 'none';
         this.hidePreview();
         this.showLoading(false);
+        this.showLandingView();
     }
 }
 

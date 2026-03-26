@@ -35,8 +35,31 @@
             </div>
         </header>
 
-        <!-- ── Main Two-Column Layout ── -->
-        <main class="columns">
+        <!-- ── Landing Page (shown before first upload) ── -->
+        <div class="landing" id="landingView">
+            <div class="landing-header">
+                <h1><i class="fas fa-file-pdf"></i> PDF to Text Converter</h1>
+                <p>Convert multiple PDF files to text documents instantly</p>
+            </div>
+            <div class="landing-card">
+                <div class="landing-drop" id="landingDrop">
+                    <i class="fas fa-cloud-upload-alt landing-icon"></i>
+                    <h3>Drag & Drop PDF Files Here</h3>
+                    <p>or click to browse</p>
+                    <button class="landing-browse-btn" id="landingBrowseBtn">
+                        <i class="fas fa-folder-open"></i> Choose Files
+                    </button>
+                </div>
+                <div class="landing-features">
+                    <p><i class="fas fa-info-circle"></i> Supports all PDF files including fillable forms and scanned documents (up to 100MB each)</p>
+                    <p><i class="fas fa-shield-alt"></i> Files are processed securely with OCR and AI Vision when needed</p>
+                    <p><i class="fas fa-brain"></i> Advanced text extraction with multiple methods for maximum accuracy</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Working View (shown after first upload) ── -->
+        <main class="columns" id="workingView" style="display:none;">
             <!-- LEFT: Upload + File List (always visible) -->
             <div class="col-left">
                 <!-- Action bar — shown when files are queued -->
