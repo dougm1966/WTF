@@ -16,6 +16,7 @@ const mime = require('mime-types');
 
 // Import PDF processing functionality
 const EnhancedPDFProcessor = require('./pdf-processor-enhanced');
+const HistoryStore = require('./history');
 
 // Initialize Express app
 const app = express();
@@ -55,10 +56,10 @@ app.use(helmet({
     contentSecurityPolicy: {
         directives: {
             defaultSrc: ["'self'"],
-            styleSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com"],
+            styleSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com", "https://fonts.googleapis.com"],
             scriptSrc: ["'self'"],
             imgSrc: ["'self'", "data:", "https:"],
-            fontSrc: ["'self'", "https://cdnjs.cloudflare.com"],
+            fontSrc: ["'self'", "https://cdnjs.cloudflare.com", "https://fonts.gstatic.com"],
             connectSrc: ["'self'"]
         }
     }
@@ -70,7 +71,7 @@ app.use(express.static('public'));
 
 // Ensure required directories exist
 const ensureDirectories = async () => {
-    const dirs = ['uploads/pdfs', 'uploads/texts', 'uploads/temp', 'logs'];
+    const dirs = ['uploads/pdfs', 'uploads/texts', 'uploads/temp', 'logs', 'data'];
     for (const dir of dirs) {
         await fs.ensureDir(dir);
     }
@@ -128,10 +129,18 @@ const pdfProcessor = new EnhancedPDFProcessor({
     concurrency: parseInt(process.env.CONCURRENT_PROCESSING) || 3,
     tempDir: 'uploads/temp',
     outputDir: 'uploads/texts',
-    openaiApiKey: process.env.OPENAI_API_KEY,
+    openRouterApiKey: process.env.OPENROUTER_API_KEY,
+    openRouterModel: process.env.OPENROUTER_MODEL,
+    openaiApiKey: process.env.OPENAI_API_KEY, // fallback if no OpenRouter key
     useOCR: true,
     useVision: true
 });
+
+// Initialize history store
+const history = new HistoryStore();
+
+// Run history cleanup daily
+setInterval(() => history.cleanup(), 24 * 60 * 60 * 1000);
 
 // Routes
 
@@ -289,6 +298,57 @@ app.delete('/api/cleanup/:jobId', (req, res) => {
     res.json({ message: 'Job cleaned up successfully' });
 });
 
+// ── History API ──
+
+// Get all history entries
+app.get('/api/history', (req, res) => {
+    res.json(history.getAll());
+});
+
+// Delete a history entry
+app.delete('/api/history/:id', (req, res) => {
+    const removed = history.remove(req.params.id, 'uploads/texts');
+    if (removed) {
+        res.json({ message: 'Entry deleted' });
+    } else {
+        res.status(404).json({ error: 'Entry not found' });
+    }
+});
+
+// Export all history as ZIP
+app.get('/api/history/export', async (req, res) => {
+    const textFiles = history.getTextFiles('uploads/texts');
+    if (textFiles.length === 0) {
+        return res.status(404).json({ error: 'No files to export' });
+    }
+
+    try {
+        const archive = archiver('zip', { zlib: { level: 9 } });
+        res.attachment('wtf-export.zip');
+        archive.pipe(res);
+
+        for (const file of textFiles) {
+            archive.file(file.filepath, { name: file.filename });
+        }
+
+        archive.finalize();
+    } catch (error) {
+        logger.error('History export error:', error);
+        res.status(500).json({ error: 'Export failed' });
+    }
+});
+
+// Get server config (model + pricing for frontend)
+app.get('/api/config', (req, res) => {
+    res.json({
+        model: process.env.OPENROUTER_MODEL || 'google/gemini-flash-2.0',
+        pricing: {
+            inputPerMillion: 0.10,
+            outputPerMillion: 0.40
+        }
+    });
+});
+
 // Process job function
 async function processJob(jobId) {
     const job = jobs.get(jobId);
@@ -316,9 +376,23 @@ async function processJob(jobId) {
                 
                 if (result.status === 'success') {
                     job.completed++;
-                    job.messages.push({ 
-                        text: `Successfully converted: ${file.originalName}`, 
-                        type: 'success' 
+                    // Save to persistent history
+                    const pageCount = result.pageCount || 1;
+                    const inputTokens = pageCount * 1105;
+                    const outputTokens = pageCount * 500;
+                    const estimatedCost = (inputTokens * 0.10 + outputTokens * 0.40) / 1_000_000;
+                    history.add({
+                        originalFilename: file.originalName,
+                        textFilename: result.textFile,
+                        fileSize: file.size,
+                        pageCount: pageCount,
+                        extractionMethod: result.extractionMethod,
+                        estimatedCost: estimatedCost,
+                        status: 'success'
+                    });
+                    job.messages.push({
+                        text: `Successfully converted: ${file.originalName}`,
+                        type: 'success'
                     });
                 } else {
                     job.failed++;
@@ -378,15 +452,8 @@ function cleanupJob(jobId) {
             }
         }
 
-        // Remove text files
-        for (const result of job.results) {
-            if (result.status === 'success') {
-                const textPath = path.join('uploads/texts', result.textFile);
-                if (fs.existsSync(textPath)) {
-                    fs.unlinkSync(textPath);
-                }
-            }
-        }
+        // Text files are now managed by HistoryStore (30-day retention)
+        // Do NOT delete them here — they persist for the user's document library
 
         // Remove job from memory
         jobs.delete(jobId);

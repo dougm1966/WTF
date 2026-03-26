@@ -5,141 +5,123 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WTF — PDF to Text</title>
     <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=DM+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
 </head>
 <body>
-    <div class="dashboard">
-        <!-- Top Bar -->
+    <div class="app">
+        <!-- ── Top Bar ── -->
         <header class="topbar">
-            <div class="topbar-left">
+            <div class="topbar-brand">
                 <h1 class="logo">WTF<span class="logo-dot">.</span></h1>
-                <span class="logo-sub">PDF &rarr; Text</span>
+                <span class="logo-sub">pdf to text</span>
             </div>
             <div class="topbar-stats">
-                <div class="stat-pill">
-                    <i class="fas fa-file-alt"></i>
-                    <span id="statFiles">0</span>
-                    <label>files</label>
+                <div class="stat-chip">
+                    <span class="stat-val" id="statFiles">0</span>
+                    <span class="stat-label">files</span>
                 </div>
-                <div class="stat-pill">
-                    <i class="fas fa-layer-group"></i>
-                    <span id="statPages">0</span>
-                    <label>pages</label>
+                <div class="stat-chip">
+                    <span class="stat-val" id="statPages">0</span>
+                    <span class="stat-label">pages</span>
                 </div>
-                <div class="stat-pill">
-                    <i class="fas fa-microchip"></i>
-                    <span id="statTokens">0</span>
-                    <label>tokens</label>
+                <div class="stat-chip">
+                    <span class="stat-val" id="statTokens">0</span>
+                    <span class="stat-label">tokens</span>
                 </div>
-                <div class="stat-pill cost">
-                    <i class="fas fa-dollar-sign"></i>
-                    <span id="statCost">0.00</span>
-                    <label>cost</label>
+                <div class="stat-chip accent">
+                    <span class="stat-val" id="statCost">$0.00</span>
+                    <span class="stat-label">spent</span>
                 </div>
             </div>
         </header>
 
-        <!-- Main Content -->
-        <main class="main-content">
-            <!-- Upload Section -->
-            <section class="upload-section" id="uploadSection">
-                <div class="upload-area" id="uploadArea">
-                    <div class="upload-content">
-                        <div class="upload-icon-wrap">
-                            <i class="fas fa-cloud-upload-alt"></i>
-                        </div>
-                        <h3>Drop PDFs here</h3>
-                        <p>or click to browse</p>
-                        <button class="browse-btn" id="browseBtn">
-                            <i class="fas fa-folder-open"></i> Choose Files
-                        </button>
-                        <input type="file" id="fileInput" multiple accept=".pdf">
-                    </div>
+        <!-- ── Main Two-Column Layout ── -->
+        <main class="columns">
+            <!-- LEFT: Upload + File List (always visible) -->
+            <div class="col-left">
+                <!-- Action bar — shown when files are queued -->
+                <div class="action-bar" id="actionBar" style="display:none;">
+                    <button class="btn btn-sm btn-fill" id="convertBtn"><i class="fas fa-bolt"></i> Convert</button>
+                    <button class="btn btn-sm btn-ghost" id="clearBtn"><i class="fas fa-trash"></i> Clear</button>
                 </div>
-                <div class="upload-meta">
-                    <span><i class="fas fa-shield-alt"></i> OCR + AI Vision</span>
-                    <span><i class="fas fa-file-pdf"></i> Up to 100MB</span>
-                    <span><i class="fas fa-layer-group"></i> Batch processing</span>
-                </div>
-            </section>
 
-            <!-- File List Section -->
-            <section class="panel" id="fileListSection" style="display: none;">
-                <div class="panel-header">
-                    <h2><i class="fas fa-list"></i> Queue</h2>
-                    <div class="panel-actions">
-                        <button class="btn btn-ghost" id="addMoreBtn">
-                            <i class="fas fa-plus"></i> Add
-                        </button>
-                        <button class="btn btn-accent" id="convertBtn">
-                            <i class="fas fa-bolt"></i> Convert
-                        </button>
-                        <button class="btn btn-ghost" id="clearBtn">
-                            <i class="fas fa-trash"></i> Clear
-                        </button>
-                    </div>
+                <!-- Upload zone — always visible -->
+                <div class="drop-area" id="uploadArea">
+                    <i class="fas fa-arrow-up-from-bracket drop-icon"></i>
+                    <p class="drop-label">Drop PDFs or <button class="link-btn" id="browseBtn">browse</button></p>
+                    <p class="drop-hint">OCR + AI Vision &middot; up to 100 MB</p>
+                    <input type="file" id="fileInput" multiple accept=".pdf">
                 </div>
-                <div class="file-list" id="fileList"></div>
-            </section>
 
-            <!-- Progress Section -->
-            <section class="panel" id="progressSection" style="display: none;">
-                <div class="panel-header">
-                    <h2><i class="fas fa-spinner fa-spin"></i> Converting</h2>
+                <!-- File list area — shown when files exist -->
+                <div class="file-area" id="fileArea" style="display:none;">
+                    <div class="file-list" id="fileList"></div>
                 </div>
-                <div class="progress-bar-wrap">
-                    <div class="progress-bar">
+
+                <!-- Progress — shown during conversion -->
+                <div class="progress-area" id="progressArea" style="display:none;">
+                    <div class="progress-row">
+                        <span class="progress-label"><i class="fas fa-spinner fa-spin"></i> Converting&hellip;</span>
+                        <span class="progress-pct" id="progressText">0%</span>
+                    </div>
+                    <div class="progress-track">
                         <div class="progress-fill" id="progressFill"></div>
                     </div>
-                    <span class="progress-pct" id="progressText">0%</span>
+                    <div class="status-log" id="statusMessages"></div>
                 </div>
-                <div class="status-log" id="statusMessages"></div>
-            </section>
 
-            <!-- Results Section -->
-            <section class="panel" id="resultsSection" style="display: none;">
-                <div class="panel-header">
-                    <h2><i class="fas fa-check-circle"></i> Done</h2>
-                    <div class="panel-actions">
-                        <button class="btn btn-accent" id="downloadAllBtn">
-                            <i class="fas fa-download"></i> Download ZIP
-                        </button>
-                        <button class="btn btn-ghost" id="newConversionBtn">
-                            <i class="fas fa-plus"></i> New
-                        </button>
+                <!-- Results summary — shown after conversion -->
+                <div class="results-bar" id="resultsBar" style="display:none;">
+                    <div id="resultsSummary" class="results-summary"></div>
+                    <div class="results-actions">
+                        <button class="btn btn-sm btn-fill" id="downloadAllBtn"><i class="fas fa-download"></i> ZIP</button>
+                        <button class="btn btn-sm btn-ghost" id="newConversionBtn"><i class="fas fa-plus"></i> New</button>
                     </div>
                 </div>
-                <div id="resultsSummary" class="results-summary"></div>
-                <div id="individualDownloads" class="individual-downloads"></div>
-            </section>
 
-            <!-- Error Section -->
-            <section class="panel" id="errorSection" style="display: none;">
-                <div class="panel-header">
-                    <h2><i class="fas fa-exclamation-triangle"></i> Error</h2>
+                <!-- Error — shown on failure -->
+                <div class="error-area" id="errorArea" style="display:none;">
+                    <div class="error-box" id="errorMessage"></div>
+                    <button class="btn btn-sm btn-fill" id="retryBtn"><i class="fas fa-redo"></i> Retry</button>
                 </div>
-                <div class="error-msg" id="errorMessage"></div>
-                <button class="btn btn-accent" id="retryBtn">
-                    <i class="fas fa-redo"></i> Retry
-                </button>
-            </section>
+            </div>
+
+            <!-- RIGHT: Text Preview -->
+            <div class="col-right">
+                <!-- Empty state -->
+                <div class="preview-empty" id="previewEmpty">
+                    <i class="fas fa-file-lines"></i>
+                    <p>Text preview</p>
+                    <p class="hint">Converted files will appear here</p>
+                </div>
+
+                <!-- Preview content -->
+                <div class="preview-content" id="previewContent" style="display:none;">
+                    <div class="preview-header">
+                        <span class="preview-filename" id="previewFilename"></span>
+                        <a class="btn btn-sm btn-ghost" id="previewDownload" download><i class="fas fa-download"></i></a>
+                    </div>
+                    <pre class="preview-body" id="previewBody"></pre>
+                </div>
+            </div>
         </main>
 
-        <!-- Footer -->
+        <!-- ── Footer ── -->
         <footer class="bottombar">
-            <span class="pricing-note">
-                <i class="fas fa-info-circle"></i>
-                GPT-4o Vision: $2.50/1M input &middot; $10.00/1M output tokens
+            <span class="model-info" id="modelInfo">
+                Gemini Flash 2.0 &middot; $0.10/1M in &middot; $0.40/1M out &middot; via OpenRouter
             </span>
-            <span class="powered-by">Built with AI Agent Team</span>
         </footer>
     </div>
 
     <!-- Loading Overlay -->
-    <div class="loading-overlay" id="loadingOverlay" style="display: none;">
-        <div class="loading-spinner">
+    <div class="loading-overlay" id="loadingOverlay" style="display:none;">
+        <div class="loading-inner">
             <i class="fas fa-circle-notch fa-spin"></i>
-            <p>Processing...</p>
+            <p>Processing&hellip;</p>
         </div>
     </div>
 

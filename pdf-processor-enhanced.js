@@ -13,14 +13,21 @@ class EnhancedPDFProcessor {
         this.concurrency = options.concurrency || 3;
         this.tempDir = options.tempDir || 'uploads/temp';
         this.outputDir = options.outputDir || 'uploads/texts';
-        this.openaiApiKey = options.openaiApiKey;
         this.useOCR = options.useOCR || false;
         this.useVision = options.useVision || false;
-        
-        // Initialize OpenAI client if API key is provided
-        if (this.openaiApiKey) {
+
+        // Initialize OpenAI-compatible client (OpenRouter preferred, OpenAI fallback)
+        if (options.openRouterApiKey) {
+            this.model = options.openRouterModel || 'google/gemini-flash-2.0';
             this.openai = new OpenAI({
-                apiKey: this.openaiApiKey
+                apiKey: options.openRouterApiKey,
+                baseURL: 'https://openrouter.ai/api/v1',
+                defaultHeaders: { 'X-Title': 'WTF PDF Converter' }
+            });
+        } else if (options.openaiApiKey) {
+            this.model = 'gpt-4o';
+            this.openai = new OpenAI({
+                apiKey: options.openaiApiKey
             });
         }
         
@@ -327,7 +334,7 @@ class EnhancedPDFProcessor {
                     const base64Image = imageBuffer.toString('base64');
 
                     const response = await this.openai.chat.completions.create({
-                        model: "gpt-4-vision-preview",
+                        model: this.model,
                         messages: [
                             {
                                 role: "user",

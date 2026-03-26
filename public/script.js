@@ -1,61 +1,52 @@
-// ── Usage Tracker (localStorage-backed, GPT-4o Vision pricing) ──
+// ── Usage Tracker (localStorage, OpenRouter/Gemini Flash pricing) ──
 class UsageTracker {
     constructor() {
         this.STORAGE_KEY = 'wtf_usage';
-        // GPT-4o pricing (2025)
         this.PRICING = {
-            inputPerMillion: 2.50,
-            outputPerMillion: 10.00,
-            tokensPerPageInput: 1105, // Vision high-detail: 85 base + 170 * ~6 tiles
-            tokensPerPageOutput: 500, // Estimated extracted text per page
-            bytesPerPage: 150 * 1024 // ~150KB per PDF page (rough heuristic)
+            inputPerMillion: 0.10,
+            outputPerMillion: 0.40,
+            tokensPerPageInput: 1105,
+            tokensPerPageOutput: 500,
+            bytesPerPage: 150 * 1024
         };
         this.data = this.load();
-        this.lastConvCost = 0;
     }
 
     load() {
         try {
-            const stored = localStorage.getItem(this.STORAGE_KEY);
-            if (stored) return JSON.parse(stored);
+            const s = localStorage.getItem(this.STORAGE_KEY);
+            if (s) return JSON.parse(s);
         } catch (e) { /* ignore */ }
         return { files: 0, pages: 0, inputTokens: 0, outputTokens: 0, cost: 0 };
     }
 
     save() {
-        try {
-            localStorage.setItem(this.STORAGE_KEY, JSON.stringify(this.data));
-        } catch (e) { /* ignore */ }
+        try { localStorage.setItem(this.STORAGE_KEY, JSON.stringify(this.data)); }
+        catch (e) { /* ignore */ }
     }
 
     recordConversion(files) {
-        const successful = files.filter(f => f.success);
+        const ok = files.filter(f => f.success);
         let totalPages = 0;
-
-        for (const file of successful) {
-            const pages = Math.max(1, Math.round(file.size / this.PRICING.bytesPerPage));
-            totalPages += pages;
+        for (const f of ok) {
+            totalPages += Math.max(1, Math.round(f.size / this.PRICING.bytesPerPage));
         }
+        const inp = totalPages * this.PRICING.tokensPerPageInput;
+        const out = totalPages * this.PRICING.tokensPerPageOutput;
+        const cost = (inp * this.PRICING.inputPerMillion + out * this.PRICING.outputPerMillion) / 1e6;
 
-        const inputTokens = totalPages * this.PRICING.tokensPerPageInput;
-        const outputTokens = totalPages * this.PRICING.tokensPerPageOutput;
-        const cost = (inputTokens * this.PRICING.inputPerMillion +
-                      outputTokens * this.PRICING.outputPerMillion) / 1_000_000;
-
-        this.data.files += successful.length;
+        this.data.files += ok.length;
         this.data.pages += totalPages;
-        this.data.inputTokens += inputTokens;
-        this.data.outputTokens += outputTokens;
+        this.data.inputTokens += inp;
+        this.data.outputTokens += out;
         this.data.cost += cost;
-        this.lastConvCost = cost;
-
         this.save();
-        return { pages: totalPages, inputTokens, outputTokens, cost };
+        return { pages: totalPages, inputTokens: inp, outputTokens: out, cost };
     }
 
-    formatTokens(n) {
-        if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-        if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+    fmtTokens(n) {
+        if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+        if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
         return String(n);
     }
 
@@ -63,468 +54,417 @@ class UsageTracker {
         return {
             files: this.data.files,
             pages: this.data.pages,
-            tokens: this.formatTokens(this.data.inputTokens + this.data.outputTokens),
-            cost: this.data.cost.toFixed(2)
+            tokens: this.fmtTokens(this.data.inputTokens + this.data.outputTokens),
+            cost: '$' + this.data.cost.toFixed(2)
         };
-    }
-
-    getLastConversionCost() {
-        return this.lastConvCost;
     }
 }
 
-// ── PDF to Text Converter — Frontend JavaScript ──
+// ── Main App ──
 class PDFConverter {
     constructor() {
         this.files = [];
         this.currentJobId = null;
         this.conversionResults = [];
+        this.convertedMap = new Map(); // originalName → { textFile, status }
+        this.activePreview = null;
         this.usageTracker = new UsageTracker();
-        this.initializeElements();
-        this.attachEventListeners();
-        this.updateUsageDisplay();
+        this.initElements();
+        this.attachEvents();
+        this.updateStats();
+        this.loadConfig();
     }
 
-    initializeElements() {
-        // Upload elements
+    initElements() {
         this.uploadArea = document.getElementById('uploadArea');
         this.fileInput = document.getElementById('fileInput');
         this.browseBtn = document.getElementById('browseBtn');
 
-        // Section elements
-        this.fileListSection = document.getElementById('fileListSection');
+        this.fileArea = document.getElementById('fileArea');
         this.fileList = document.getElementById('fileList');
-        this.progressSection = document.getElementById('progressSection');
-        this.resultsSection = document.getElementById('resultsSection');
-        this.errorSection = document.getElementById('errorSection');
+        this.actionBar = document.getElementById('actionBar');
 
-        // Progress elements
+        this.progressArea = document.getElementById('progressArea');
         this.progressFill = document.getElementById('progressFill');
         this.progressText = document.getElementById('progressText');
         this.statusMessages = document.getElementById('statusMessages');
 
-        // Button elements
+        this.resultsBar = document.getElementById('resultsBar');
+        this.resultsSummary = document.getElementById('resultsSummary');
+
+        this.errorArea = document.getElementById('errorArea');
+        this.errorMessage = document.getElementById('errorMessage');
+
         this.convertBtn = document.getElementById('convertBtn');
         this.clearBtn = document.getElementById('clearBtn');
         this.downloadAllBtn = document.getElementById('downloadAllBtn');
         this.newConversionBtn = document.getElementById('newConversionBtn');
         this.retryBtn = document.getElementById('retryBtn');
-        this.addMoreBtn = document.getElementById('addMoreBtn');
 
-        // Results elements
-        this.resultsSummary = document.getElementById('resultsSummary');
-        this.individualDownloads = document.getElementById('individualDownloads');
-
-        // Error elements
-        this.errorMessage = document.getElementById('errorMessage');
-
-        // Loading overlay
         this.loadingOverlay = document.getElementById('loadingOverlay');
+
+        // Preview
+        this.previewEmpty = document.getElementById('previewEmpty');
+        this.previewContent = document.getElementById('previewContent');
+        this.previewFilename = document.getElementById('previewFilename');
+        this.previewBody = document.getElementById('previewBody');
+        this.previewDownload = document.getElementById('previewDownload');
     }
 
-    attachEventListeners() {
-        // File upload events
+    attachEvents() {
         this.browseBtn.addEventListener('click', () => this.fileInput.click());
-        this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e.target.files));
+        this.fileInput.addEventListener('change', e => this.handleFileSelect(e.target.files));
+        this.uploadArea.addEventListener('dragover', e => this.handleDragOver(e));
+        this.uploadArea.addEventListener('dragleave', e => this.handleDragLeave(e));
+        this.uploadArea.addEventListener('drop', e => this.handleFileDrop(e));
 
-        // Drag and drop events
-        this.uploadArea.addEventListener('dragover', (e) => this.handleDragOver(e));
-        this.uploadArea.addEventListener('dragleave', (e) => this.handleDragLeave(e));
-        this.uploadArea.addEventListener('drop', (e) => this.handleFileDrop(e));
-
-        // Button events
         this.convertBtn.addEventListener('click', () => this.startConversion());
         this.clearBtn.addEventListener('click', () => this.clearFiles());
         this.downloadAllBtn.addEventListener('click', () => this.downloadAllFiles());
-        this.newConversionBtn.addEventListener('click', () => this.resetApplication());
-        this.retryBtn.addEventListener('click', () => this.resetApplication());
-
-        // Add more files button
-        if (this.addMoreBtn) {
-            this.addMoreBtn.addEventListener('click', () => this.fileInput.click());
-        }
+        this.newConversionBtn.addEventListener('click', () => this.resetApp());
+        this.retryBtn.addEventListener('click', () => this.resetApp());
     }
 
-    handleDragOver(e) {
-        e.preventDefault();
-        this.uploadArea.classList.add('dragover');
-    }
-
-    handleDragLeave(e) {
-        e.preventDefault();
-        this.uploadArea.classList.remove('dragover');
-    }
+    // ── Drag & Drop ──
+    handleDragOver(e) { e.preventDefault(); this.uploadArea.classList.add('dragover'); }
+    handleDragLeave(e) { e.preventDefault(); this.uploadArea.classList.remove('dragover'); }
 
     handleFileDrop(e) {
         e.preventDefault();
         this.uploadArea.classList.remove('dragover');
-        const files = Array.from(e.dataTransfer.files);
-        this.processFiles(files);
+        this.processFiles(Array.from(e.dataTransfer.files));
     }
 
-    handleFileSelect(files) {
-        this.processFiles(Array.from(files));
-    }
+    handleFileSelect(files) { this.processFiles(Array.from(files)); }
 
     processFiles(files) {
-        const validFiles = files.filter(file => {
-            const fileName = file.name.toLowerCase();
-            if (!fileName.endsWith('.pdf')) {
-                this.showNotification(`Only PDF files are allowed. ${file.name} was skipped.`, 'error');
+        const valid = files.filter(f => {
+            if (!f.name.toLowerCase().endsWith('.pdf')) {
+                this.notify(`${f.name} skipped — PDF only`, 'error');
                 return false;
             }
-            if (file.size > 100 * 1024 * 1024) {
-                this.showNotification(`File ${file.name} is too large. Maximum size is 100MB.`, 'error');
+            if (f.size > 100 * 1024 * 1024) {
+                this.notify(`${f.name} too large (max 100 MB)`, 'error');
                 return false;
             }
             return true;
         });
+        if (!valid.length) return;
 
-        if (validFiles.length === 0) return;
-
-        validFiles.forEach(file => {
-            if (!this.files.some(existing => existing.name === file.name && existing.size === file.size)) {
-                this.files.push(file);
-            }
+        valid.forEach(f => {
+            if (!this.files.some(x => x.name === f.name && x.size === f.size))
+                this.files.push(f);
         });
 
-        this.updateFileList();
-        this.showSection('fileListSection');
+        this.renderFileList();
+        this.fileInput.value = '';
     }
 
-    updateFileList() {
-        this.fileList.innerHTML = '';
+    renderFileList() {
+        // Show/hide file area and action bar
+        const hasFiles = this.files.length > 0;
+        this.fileArea.style.display = hasFiles ? 'flex' : 'none';
+        this.actionBar.style.display = hasFiles ? 'flex' : 'none';
 
-        this.files.forEach((file, index) => {
-            const fileItem = document.createElement('div');
-            fileItem.className = 'file-item fade-in';
-            fileItem.innerHTML = `
+        this.fileList.innerHTML = '';
+        this.files.forEach((f, i) => {
+            const converted = this.convertedMap.get(f.name);
+            const el = document.createElement('div');
+            el.className = 'file-item fade-in';
+
+            let icon = 'fa-file-pdf';
+            if (converted) {
+                icon = converted.status === 'success' ? 'fa-check-circle' : 'fa-times-circle';
+                if (converted.status === 'success') el.classList.add('clickable');
+                if (this.activePreview === f.name) el.classList.add('active');
+            }
+
+            el.innerHTML = `
                 <div class="file-info-item">
-                    <i class="fas fa-file-pdf"></i>
+                    <i class="fas ${icon}"></i>
                     <div>
-                        <div class="file-name">${file.name}</div>
-                        <div class="file-size">${this.formatFileSize(file.size)}</div>
+                        <div class="file-name">${f.name}</div>
+                        <div class="file-size">${this.fmtSize(f.size)}</div>
                     </div>
                 </div>
-                <button class="remove-file" data-index="${index}">
-                    <i class="fas fa-times"></i>
-                </button>
-            `;
+                ${!converted ? `<button class="remove-file" data-i="${i}"><i class="fas fa-times"></i></button>` : ''}`;
 
-            const removeBtn = fileItem.querySelector('.remove-file');
-            removeBtn.addEventListener('click', () => this.removeFile(index));
+            if (!converted) {
+                const rmBtn = el.querySelector('.remove-file');
+                if (rmBtn) rmBtn.addEventListener('click', () => this.removeFile(i));
+            }
 
-            this.fileList.appendChild(fileItem);
+            if (converted && converted.status === 'success') {
+                el.addEventListener('click', () => this.previewFile(converted.textFile, f.name));
+            }
+
+            this.fileList.appendChild(el);
         });
     }
 
-    removeFile(index) {
-        this.files.splice(index, 1);
-        this.updateFileList();
-
-        if (this.files.length === 0) {
-            this.showSection('uploadSection');
+    removeFile(i) {
+        this.files.splice(i, 1);
+        if (!this.files.length) {
+            this.fileArea.style.display = 'none';
+            this.actionBar.style.display = 'none';
         }
+        this.renderFileList();
     }
 
     clearFiles() {
         this.files = [];
+        this.convertedMap.clear();
         this.fileInput.value = '';
-        this.showSection('uploadSection');
+        this.fileArea.style.display = 'none';
+        this.actionBar.style.display = 'none';
+        this.progressArea.style.display = 'none';
+        this.resultsBar.style.display = 'none';
+        this.errorArea.style.display = 'none';
+        this.hidePreview();
     }
 
-    formatFileSize(bytes) {
-        if (bytes === 0) return '0 B';
-        const k = 1024;
-        const sizes = ['B', 'KB', 'MB', 'GB'];
-        const i = Math.floor(Math.log(bytes) / Math.log(k));
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    fmtSize(b) {
+        if (!b) return '0 B';
+        const u = ['B', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(b) / Math.log(1024));
+        return (b / Math.pow(1024, i)).toFixed(1) + ' ' + u[i];
     }
 
+    // ── Conversion Flow ──
     async startConversion() {
-        if (this.files.length === 0) {
-            this.showNotification('Please select files to convert.', 'error');
-            return;
-        }
+        if (!this.files.length) { this.notify('Add files first', 'error'); return; }
 
-        this.showSection('progressSection');
+        // Show progress, hide results/error
+        this.progressArea.style.display = 'flex';
+        this.resultsBar.style.display = 'none';
+        this.errorArea.style.display = 'none';
+        this.actionBar.style.display = 'none';
+        this.statusMessages.innerHTML = '';
+        this.progressFill.style.width = '0%';
+        this.progressText.textContent = '0%';
         this.showLoading(true);
 
         try {
-            const formData = new FormData();
-            this.files.forEach(file => {
-                formData.append('pdfs', file);
-            });
+            const fd = new FormData();
+            this.files.forEach(f => fd.append('pdfs', f));
 
-            const response = await fetch('/api/upload', {
-                method: 'POST',
-                body: formData
-            });
+            const res = await fetch('/api/upload', { method: 'POST', body: fd });
+            if (!res.ok) throw new Error(`Upload failed: ${res.statusText}`);
 
-            if (!response.ok) {
-                throw new Error(`Upload failed: ${response.statusText}`);
-            }
-
-            const result = await response.json();
-            this.currentJobId = result.jobId;
+            const data = await res.json();
+            this.currentJobId = data.jobId;
             this.pollProgress();
-
-        } catch (error) {
-            this.showError(error.message);
+        } catch (err) {
+            this.showError(err.message);
             this.showLoading(false);
         }
     }
 
     async pollProgress() {
         if (!this.currentJobId) return;
-
         try {
-            const response = await fetch(`/api/status/${this.currentJobId}`);
-
-            if (!response.ok) {
-                throw new Error(`Status check failed: ${response.statusText}`);
-            }
-
-            const status = await response.json();
+            const res = await fetch(`/api/status/${this.currentJobId}`);
+            if (!res.ok) throw new Error('Status check failed');
+            const status = await res.json();
             this.updateProgress(status);
 
-            if (status.status === 'completed') {
-                await this.fetchResults();
-            } else if (status.status === 'failed') {
-                this.showError('Conversion failed. Please try again.');
-                this.showLoading(false);
-            } else {
-                setTimeout(() => this.pollProgress(), 1000);
-            }
-
-        } catch (error) {
-            this.showError(error.message);
+            if (status.status === 'completed') { await this.fetchResults(); }
+            else if (status.status === 'failed') { this.showError('Conversion failed.'); this.showLoading(false); }
+            else { setTimeout(() => this.pollProgress(), 1000); }
+        } catch (err) {
+            this.showError(err.message);
             this.showLoading(false);
         }
     }
 
     updateProgress(status) {
-        const percentage = status.progress || 0;
-        this.progressFill.style.width = `${percentage}%`;
-        this.progressText.textContent = `${percentage}%`;
-
-        if (status.currentFile) {
-            this.addStatusMessage(`Processing: ${status.currentFile}`, 'processing');
-        }
-
-        if (status.completed && status.failed) {
-            this.addStatusMessage(`Completed: ${status.completed}, Failed: ${status.failed}`, 'info');
-        }
-
-        status.messages?.forEach(message => {
-            this.addStatusMessage(message.text, message.type);
-        });
+        const pct = status.progress || 0;
+        this.progressFill.style.width = `${pct}%`;
+        this.progressText.textContent = `${pct}%`;
+        if (status.currentFile) this.addLog(`Processing: ${status.currentFile}`, 'processing');
+        status.messages?.forEach(m => this.addLog(m.text, m.type));
     }
 
-    addStatusMessage(message, type = 'info') {
-        const messageElement = document.createElement('div');
-        messageElement.className = `status-message ${type}`;
-        messageElement.textContent = message;
-
-        this.statusMessages.appendChild(messageElement);
+    addLog(msg, type = 'info') {
+        const el = document.createElement('div');
+        el.className = `status-message ${type}`;
+        el.textContent = msg;
+        this.statusMessages.appendChild(el);
         this.statusMessages.scrollTop = this.statusMessages.scrollHeight;
-
-        if (this.statusMessages.children.length > 50) {
-            this.statusMessages.removeChild(this.statusMessages.firstChild);
-        }
+        if (this.statusMessages.children.length > 50) this.statusMessages.removeChild(this.statusMessages.firstChild);
     }
 
     async fetchResults() {
         try {
-            const response = await fetch(`/api/results/${this.currentJobId}`);
-
-            if (!response.ok) {
-                throw new Error(`Failed to fetch results: ${response.statusText}`);
-            }
-
-            this.conversionResults = await response.json();
+            const res = await fetch(`/api/results/${this.currentJobId}`);
+            if (!res.ok) throw new Error('Failed to fetch results');
+            this.conversionResults = await res.json();
             this.showResults();
             this.showLoading(false);
-
-        } catch (error) {
-            this.showError(error.message);
+        } catch (err) {
+            this.showError(err.message);
             this.showLoading(false);
         }
     }
 
     showResults() {
-        const successful = this.conversionResults.filter(r => r.status === 'success');
-        const failed = this.conversionResults.filter(r => r.status === 'error');
+        const ok = this.conversionResults.filter(r => r.status === 'success');
+        const fail = this.conversionResults.filter(r => r.status === 'error');
 
-        // Record usage and calculate cost
-        const fileData = this.files.map(file => {
-            const result = this.conversionResults.find(r => r.originalName === file.name);
-            return { size: file.size, success: result?.status === 'success' };
+        // Record usage
+        const fileData = this.files.map(f => {
+            const r = this.conversionResults.find(x => x.originalName === f.name);
+            return { size: f.size, success: r?.status === 'success' };
         });
-        const convStats = this.usageTracker.recordConversion(fileData);
-        this.updateUsageDisplay();
+        const conv = this.usageTracker.recordConversion(fileData);
+        this.updateStats();
 
-        // Compact summary with stats
-        this.resultsSummary.innerHTML = `
-            <span class="result-stat success"><i class="fas fa-check"></i> ${successful.length} converted</span>
-            ${failed.length > 0 ? `<span class="result-stat error"><i class="fas fa-times"></i> ${failed.length} failed</span>` : ''}
-            <span class="result-stat total"><i class="fas fa-file"></i> ${this.conversionResults.length} total</span>
-            <span class="result-stat cost"><i class="fas fa-dollar-sign"></i> $${convStats.cost.toFixed(4)} est.</span>
-        `;
-
-        // Individual downloads
-        this.individualDownloads.innerHTML = '';
-
-        successful.forEach(result => {
-            const downloadItem = document.createElement('div');
-            downloadItem.className = 'download-item fade-in';
-            downloadItem.innerHTML = `
-                <span><i class="fas fa-file-alt"></i> ${result.originalName}</span>
-                <a href="/api/download/${result.textFile}" download>
-                    <i class="fas fa-download"></i> Download
-                </a>
-            `;
-            this.individualDownloads.appendChild(downloadItem);
-        });
-
-        if (failed.length > 0) {
-            const failedHeader = document.createElement('h4');
-            failedHeader.textContent = 'Failed';
-            this.individualDownloads.appendChild(failedHeader);
-
-            failed.forEach(result => {
-                const errorItem = document.createElement('div');
-                errorItem.className = 'download-item';
-                errorItem.innerHTML = `
-                    <span><i class="fas fa-exclamation-triangle" style="color: var(--danger);"></i> ${result.originalName}</span>
-                    <span style="color: var(--danger); font-size: 0.7rem;">${result.error}</span>
-                `;
-                this.individualDownloads.appendChild(errorItem);
+        // Build converted map for file list status indicators
+        this.conversionResults.forEach(r => {
+            this.convertedMap.set(r.originalName, {
+                status: r.status,
+                textFile: r.textFile || null
             });
-        }
+        });
 
-        this.showSection('resultsSection');
+        // Re-render file list with status icons
+        this.renderFileList();
+
+        // Summary bar
+        this.resultsSummary.innerHTML = `
+            <span class="result-stat success"><i class="fas fa-check"></i> ${ok.length} converted</span>
+            ${fail.length ? `<span class="result-stat error"><i class="fas fa-times"></i> ${fail.length} failed</span>` : ''}
+            <span class="result-stat cost"><i class="fas fa-dollar-sign"></i> $${conv.cost.toFixed(4)}</span>`;
+
+        this.progressArea.style.display = 'none';
+        this.resultsBar.style.display = 'flex';
+
+        // Auto-preview first successful file
+        if (ok.length > 0) {
+            this.previewFile(ok[0].textFile, ok[0].originalName);
+        }
     }
 
     async downloadAllFiles() {
         try {
-            const response = await fetch(`/api/download/batch/${this.currentJobId}`);
-
-            if (!response.ok) {
-                throw new Error(`Failed to create batch download: ${response.statusText}`);
-            }
-
-            const blob = await response.blob();
-            const url = window.URL.createObjectURL(blob);
+            const res = await fetch(`/api/download/batch/${this.currentJobId}`);
+            if (!res.ok) throw new Error('Download failed');
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `converted-files-${Date.now()}.zip`;
+            a.download = `converted-${Date.now()}.zip`;
             document.body.appendChild(a);
             a.click();
-            document.body.removeChild(a);
-            window.URL.revokeObjectURL(url);
-
-        } catch (error) {
-            this.showNotification(`Failed to download all files: ${error.message}`, 'error');
+            a.remove();
+            URL.revokeObjectURL(url);
+        } catch (err) {
+            this.notify(err.message, 'error');
         }
     }
 
-    showError(message) {
-        this.errorMessage.textContent = message;
-        this.showSection('errorSection');
-    }
+    // ── Text Preview ──
+    async previewFile(textFilename, originalName) {
+        if (!textFilename) return;
+        this.activePreview = originalName;
+        this.renderFileList(); // update active highlight
 
-    showSection(sectionId) {
-        const sections = ['uploadSection', 'fileListSection', 'progressSection', 'resultsSection', 'errorSection'];
-        sections.forEach(id => {
-            const section = document.getElementById(id);
-            if (section) section.style.display = 'none';
-        });
+        this.previewFilename.textContent = originalName.replace(/\.pdf$/i, '.txt');
+        this.previewBody.textContent = 'Loading...';
+        this.previewEmpty.style.display = 'none';
+        this.previewContent.style.display = 'flex';
+        this.previewDownload.href = `/api/download/${textFilename}`;
 
-        const targetSection = document.getElementById(sectionId);
-        if (targetSection) {
-            targetSection.style.display = 'flex';
-            targetSection.classList.add('fade-in');
+        try {
+            const res = await fetch(`/api/download/${textFilename}`);
+            if (!res.ok) throw new Error('Failed to load preview');
+            const text = await res.text();
+            this.previewBody.textContent = text || '(empty file)';
+        } catch (err) {
+            this.previewBody.textContent = `Error loading preview: ${err.message}`;
         }
     }
 
-    showLoading(show) {
-        this.loadingOverlay.style.display = show ? 'flex' : 'none';
+    hidePreview() {
+        this.activePreview = null;
+        this.previewEmpty.style.display = 'flex';
+        this.previewContent.style.display = 'none';
+        this.previewBody.textContent = '';
     }
 
-    showNotification(message, type = 'info') {
-        const notification = document.createElement('div');
-        notification.style.cssText = `
-            position: fixed;
-            top: 16px;
-            right: 16px;
-            padding: 10px 16px;
-            background: ${type === 'error' ? '#7f1d1d' : '#14532d'};
-            color: ${type === 'error' ? '#fca5a5' : '#86efac'};
-            border: 1px solid ${type === 'error' ? '#991b1b' : '#166534'};
-            border-radius: 6px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
-            z-index: 1001;
-            max-width: 300px;
-            font-size: 0.8rem;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-        `;
-        notification.textContent = message;
-        document.body.appendChild(notification);
-
-        setTimeout(() => {
-            if (notification.parentNode) {
-                notification.parentNode.removeChild(notification);
+    // ── Config (dynamic model/pricing from server) ──
+    async loadConfig() {
+        try {
+            const res = await fetch('/api/config');
+            if (!res.ok) return;
+            const cfg = await res.json();
+            const el = document.getElementById('modelInfo');
+            if (el && cfg.model) {
+                const m = cfg.model.split('/').pop().replace(/-/g, ' ');
+                el.textContent = `${m} \u00b7 $${cfg.pricing.inputPerMillion}/1M in \u00b7 $${cfg.pricing.outputPerMillion}/1M out \u00b7 via OpenRouter`;
             }
-        }, 4000);
+        } catch (e) { /* use default footer text */ }
     }
 
-    updateUsageDisplay() {
-        const stats = this.usageTracker.getStats();
-        const el = (id) => document.getElementById(id);
+    // ── UI Helpers ──
+    showError(msg) {
+        this.errorMessage.textContent = msg;
+        this.progressArea.style.display = 'none';
+        this.resultsBar.style.display = 'none';
+        this.errorArea.style.display = 'flex';
+        this.actionBar.style.display = 'flex';
+    }
 
-        if (el('statFiles')) el('statFiles').textContent = stats.files;
-        if (el('statPages')) el('statPages').textContent = stats.pages;
-        if (el('statTokens')) el('statTokens').textContent = stats.tokens;
-        if (el('statCost')) el('statCost').textContent = stats.cost;
+    showLoading(on) { this.loadingOverlay.style.display = on ? 'flex' : 'none'; }
 
-        // Flash animation on stat pills
-        document.querySelectorAll('.stat-pill').forEach(pill => {
-            pill.classList.remove('updated');
-            void pill.offsetWidth; // force reflow for re-animation
-            pill.classList.add('updated');
+    notify(msg, type = 'info') {
+        const n = document.createElement('div');
+        n.style.cssText = `
+            position:fixed; top:12px; right:12px; padding:8px 14px;
+            background:${type === 'error' ? '#3b1810' : '#102a15'};
+            color:${type === 'error' ? '#e8886a' : '#86efac'};
+            border:1px solid ${type === 'error' ? '#5c2a1a' : '#1a4d26'};
+            border-radius:6px; box-shadow:0 4px 16px rgba(0,0,0,0.4);
+            z-index:1001; max-width:280px; font-size:0.75rem;
+            font-family:'DM Sans',system-ui,sans-serif;`;
+        n.textContent = msg;
+        document.body.appendChild(n);
+        setTimeout(() => n.remove(), 3500);
+    }
+
+    updateStats() {
+        const s = this.usageTracker.getStats();
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+        set('statFiles', s.files);
+        set('statPages', s.pages);
+        set('statTokens', s.tokens);
+        set('statCost', s.cost);
+
+        document.querySelectorAll('.stat-chip').forEach(c => {
+            c.classList.remove('updated');
+            void c.offsetWidth;
+            c.classList.add('updated');
         });
     }
 
-    resetApplication() {
+    resetApp() {
         this.files = [];
         this.currentJobId = null;
         this.conversionResults = [];
+        this.convertedMap.clear();
         this.fileInput.value = '';
         this.statusMessages.innerHTML = '';
         this.progressFill.style.width = '0%';
         this.progressText.textContent = '0%';
-
-        this.showSection('uploadSection');
+        this.fileArea.style.display = 'none';
+        this.actionBar.style.display = 'none';
+        this.progressArea.style.display = 'none';
+        this.resultsBar.style.display = 'none';
+        this.errorArea.style.display = 'none';
+        this.hidePreview();
         this.showLoading(false);
     }
 }
 
-// Initialize
-document.addEventListener('DOMContentLoaded', () => {
-    new PDFConverter();
-});
-
-// Handle page visibility
-document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-        console.log('Page hidden - polling paused');
-    } else {
-        console.log('Page visible - polling resumed');
-    }
-});
-
-// Handle page unload
-window.addEventListener('beforeunload', () => {
-    console.log('Page unloading - cleaning up resources');
-});
+// ── Init ──
+document.addEventListener('DOMContentLoaded', () => new PDFConverter());
