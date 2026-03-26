@@ -211,13 +211,8 @@ class EnhancedPDFProcessor {
             results.graphicsMagick.error = e.message;
         }
 
-        // Tesseract
-        try {
-            await Tesseract.recognize(Buffer.alloc(1), 'eng');
-        } catch (e) {
-            // Tesseract.js works in pure JS mode even without system binary
-            results.tesseract = { available: true };
-        }
+        // Tesseract — just check the module loaded (don't try to recognize junk data)
+        results.tesseract = { available: typeof Tesseract.recognize === 'function' };
 
         // Vision API connectivity
         if (this.visionApiKey) {
