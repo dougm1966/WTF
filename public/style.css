@@ -265,6 +265,24 @@ body {
 .remove-file:hover { background: #ff5252; transform: scale(1.1); }
 .remove-file:focus-visible { outline: 2px solid #ff6b6b; outline-offset: 2px; }
 
+.file-dl-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    color: #667eea;
+    background: #f0f4ff;
+    text-decoration: none;
+    font-size: 0.75rem;
+    flex-shrink: 0;
+    transition: all 0.2s ease;
+}
+
+.file-dl-btn:hover { background: #667eea; color: white; transform: scale(1.1); }
+.file-dl-btn:focus-visible { outline: 2px solid #667eea; outline-offset: 2px; }
+
 /* ── Progress Area ── */
 .progress-area {
     flex-shrink: 0;

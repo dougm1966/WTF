@@ -98,6 +98,7 @@ class PDFConverter {
         this.convertBtn = document.getElementById('convertBtn');
         this.clearBtn = document.getElementById('clearBtn');
         this.downloadAllBtn = document.getElementById('downloadAllBtn');
+        this.clearAllBtn = document.getElementById('clearAllBtn');
         this.newConversionBtn = document.getElementById('newConversionBtn');
         this.retryBtn = document.getElementById('retryBtn');
 
@@ -121,6 +122,7 @@ class PDFConverter {
         this.convertBtn.addEventListener('click', () => this.startConversion());
         this.clearBtn.addEventListener('click', () => this.clearFiles());
         this.downloadAllBtn.addEventListener('click', () => this.downloadAllFiles());
+        if (this.clearAllBtn) this.clearAllBtn.addEventListener('click', () => this.clearFiles());
         this.newConversionBtn.addEventListener('click', () => this.resetApp());
         this.retryBtn.addEventListener('click', () => this.resetApp());
     }
@@ -187,6 +189,7 @@ class PDFConverter {
                         <div class="file-size">${this.fmtSize(f.size)}</div>
                     </div>
                 </div>
+                ${converted && converted.status === 'success' ? `<a class="file-dl-btn" href="/api/download/${converted.textFile}" download title="Download text"><i class="fas fa-download"></i></a>` : ''}
                 ${!converted ? `<button class="remove-file" data-i="${i}"><i class="fas fa-times"></i></button>` : ''}`;
 
             if (!converted) {
