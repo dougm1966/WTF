@@ -1,13 +1,10 @@
-// ── Usage Tracker (localStorage, OpenRouter/Gemini Flash pricing) ──
+// ── Usage Tracker (localStorage, actual API costs from server) ──
 class UsageTracker {
     constructor() {
         this.STORAGE_KEY = 'pdf2txt_usage';
         this.PRICING = {
             inputPerMillion: 0.10,
-            outputPerMillion: 0.40,
-            tokensPerPageInput: 1105,
-            tokensPerPageOutput: 500,
-            bytesPerPage: 150 * 1024
+            outputPerMillion: 0.40
         };
         this.data = this.load();
     }
@@ -25,23 +22,32 @@ class UsageTracker {
         catch (e) { /* ignore */ }
     }
 
-    recordConversion(files) {
-        const ok = files.filter(f => f.success);
+    recordConversion(results) {
+        const ok = results.filter(r => r.status === 'success');
         let totalPages = 0;
-        for (const f of ok) {
-            totalPages += Math.max(1, Math.round(f.size / this.PRICING.bytesPerPage));
+        let totalInputTokens = 0;
+        let totalOutputTokens = 0;
+        let totalCost = 0;
+
+        for (const r of ok) {
+            totalPages += r.pageCount || 1;
+            // Only vision uses the API — use actual token counts
+            if (r.extractionMethod === 'vision' && r.usage) {
+                const inp = r.usage.promptTokens || 0;
+                const out = r.usage.completionTokens || 0;
+                totalInputTokens += inp;
+                totalOutputTokens += out;
+                totalCost += (inp * this.PRICING.inputPerMillion + out * this.PRICING.outputPerMillion) / 1e6;
+            }
         }
-        const inp = totalPages * this.PRICING.tokensPerPageInput;
-        const out = totalPages * this.PRICING.tokensPerPageOutput;
-        const cost = (inp * this.PRICING.inputPerMillion + out * this.PRICING.outputPerMillion) / 1e6;
 
         this.data.files += ok.length;
         this.data.pages += totalPages;
-        this.data.inputTokens += inp;
-        this.data.outputTokens += out;
-        this.data.cost += cost;
+        this.data.inputTokens += totalInputTokens;
+        this.data.outputTokens += totalOutputTokens;
+        this.data.cost += totalCost;
         this.save();
-        return { pages: totalPages, inputTokens: inp, outputTokens: out, cost };
+        return { pages: totalPages, inputTokens: totalInputTokens, outputTokens: totalOutputTokens, cost: totalCost };
     }
 
     fmtTokens(n) {
@@ -55,7 +61,7 @@ class UsageTracker {
             files: this.data.files,
             pages: this.data.pages,
             tokens: this.fmtTokens(this.data.inputTokens + this.data.outputTokens),
-            cost: '$' + this.data.cost.toFixed(2)
+            cost: '$' + this.data.cost.toFixed(4)
         };
     }
 }
@@ -351,12 +357,8 @@ class PDFConverter {
         const ok = this.conversionResults.filter(r => r.status === 'success');
         const fail = this.conversionResults.filter(r => r.status === 'error');
 
-        // Record usage
-        const fileData = this.files.map(f => {
-            const r = this.conversionResults.find(x => x.originalName === f.name);
-            return { size: f.size, success: r?.status === 'success' };
-        });
-        const conv = this.usageTracker.recordConversion(fileData);
+        // Record usage from actual server results
+        const conv = this.usageTracker.recordConversion(this.conversionResults);
         this.updateStats();
 
         // Build converted map for file list status indicators

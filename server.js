@@ -376,18 +376,21 @@ async function processJob(jobId) {
                 
                 if (result.status === 'success') {
                     job.completed++;
-                    // Save to persistent history
+                    // Save to persistent history — only vision has real API costs
                     const pageCount = result.pageCount || 1;
-                    const inputTokens = pageCount * 1105;
-                    const outputTokens = pageCount * 500;
-                    const estimatedCost = (inputTokens * 0.10 + outputTokens * 0.40) / 1_000_000;
+                    const usage = result.usage || { promptTokens: 0, completionTokens: 0 };
+                    const actualCost = result.extractionMethod === 'vision'
+                        ? (usage.promptTokens * 0.10 + usage.completionTokens * 0.40) / 1_000_000
+                        : 0;
                     history.add({
                         originalFilename: file.originalName,
                         textFilename: result.textFile,
                         fileSize: file.size,
                         pageCount: pageCount,
                         extractionMethod: result.extractionMethod,
-                        estimatedCost: estimatedCost,
+                        inputTokens: usage.promptTokens,
+                        outputTokens: usage.completionTokens,
+                        cost: actualCost,
                         status: 'success'
                     });
                     job.messages.push({

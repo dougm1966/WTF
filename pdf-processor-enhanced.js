@@ -52,7 +52,8 @@ class EnhancedPDFProcessor {
             error: null,
             processingTime: 0,
             quality: null,
-            extractionMethod: 'unknown'
+            extractionMethod: 'unknown',
+            usage: { promptTokens: 0, completionTokens: 0 }
         };
 
         const startTime = Date.now();
@@ -94,6 +95,9 @@ class EnhancedPDFProcessor {
                                 extractionResult = await this.extractTextWithVision(filePath);
                                 extractionMethod = 'vision';
                                 result.extractionMethod = 'vision';
+                                if (extractionResult.usage) {
+                                    result.usage = extractionResult.usage;
+                                }
                             } catch (visionError) {
                                 console.log(`Vision extraction failed for ${originalName}: ${visionError.message}`);
                                 throw new Error('All extraction methods failed');
@@ -324,6 +328,8 @@ class EnhancedPDFProcessor {
 
             let fullText = '';
             let pageCount = 0;
+            let totalPromptTokens = 0;
+            let totalCompletionTokens = 0;
 
             // Process each page with OpenAI Vision
             for (let i = 0; i < pageImages.length; i++) {
@@ -356,7 +362,13 @@ class EnhancedPDFProcessor {
                     });
 
                     const extractedText = response.choices[0]?.message?.content || '';
-                    
+
+                    // Capture actual token usage from API response
+                    if (response.usage) {
+                        totalPromptTokens += response.usage.prompt_tokens || 0;
+                        totalCompletionTokens += response.usage.completion_tokens || 0;
+                    }
+
                     if (extractedText.trim().length > 0) {
                         fullText += `--- PAGE ${i + 1} ---\n${extractedText}\n\n`;
                         pageCount++;
@@ -380,7 +392,8 @@ class EnhancedPDFProcessor {
             return {
                 text: fullText,
                 numpages: pageCount,
-                method: 'vision'
+                method: 'vision',
+                usage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens }
             };
 
         } catch (error) {
