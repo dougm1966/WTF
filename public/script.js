@@ -907,7 +907,7 @@ class PDFConverter {
 
             // Track usage
             this.usageTracker.data.cost += data.cost || 0;
-            this.usageTracker._save();
+            this.usageTracker.save();
             this.updateStats();
 
             this.renderGroupedFileList();
@@ -1018,7 +1018,7 @@ class PDFConverter {
                         }
                     });
                     this.usageTracker.data.cost += totalCleanupCost;
-                    this.usageTracker._save();
+                    this.usageTracker.save();
                     this.updateStats();
                 }
                 this.renderGroupedFileList();
