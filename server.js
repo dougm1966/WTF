@@ -27,6 +27,9 @@ const AVAILABLE_MODELS = [
     { id: 'anthropic/claude-sonnet-4',                   name: 'Claude Sonnet 4',  inputPerMillion: 3.00,  outputPerMillion: 15.00 },
 ];
 
+const CLEANUP_MODEL = 'google/gemini-flash-2.0';
+const CLEANUP_PRICING = { inputPerMillion: 0.10, outputPerMillion: 0.40 };
+
 function getModelPricing(modelId) {
     return AVAILABLE_MODELS.find(m => m.id === modelId) || AVAILABLE_MODELS[0];
 }
@@ -373,11 +376,157 @@ app.get('/api/history/export', async (req, res) => {
     }
 });
 
+// ── AI Cleanup API ──
+
+// Single-file cleanup
+app.post('/api/cleanup', express.json(), async (req, res) => {
+    try {
+        const { filename, originalName } = req.body;
+        if (!filename) {
+            return res.status(400).json({ error: 'Missing filename' });
+        }
+
+        const rawPath = path.join('uploads/texts', filename);
+        if (!fs.existsSync(rawPath)) {
+            return res.status(404).json({ error: 'Text file not found' });
+        }
+
+        const rawText = await fs.promises.readFile(rawPath, 'utf8');
+        const cleanup = await pdfProcessor.aiCleanupText(rawText, CLEANUP_MODEL);
+
+        const cleanFilename = filename.replace(/\.txt$/, '.clean.txt');
+        const cleanPath = path.join('uploads/texts', cleanFilename);
+        await fs.promises.writeFile(cleanPath, cleanup.text, 'utf8');
+
+        const cleanupCost = (cleanup.usage.promptTokens * CLEANUP_PRICING.inputPerMillion
+            + cleanup.usage.completionTokens * CLEANUP_PRICING.outputPerMillion) / 1_000_000;
+
+        // Update history entry with cleanup cost
+        const entry = history.findByTextFilename(filename);
+        if (entry) {
+            entry.cleanTextFilename = cleanFilename;
+            entry.cleanupCost = cleanupCost;
+            entry.cost = (entry.cost || 0) + cleanupCost;
+            history.save();
+        }
+
+        logger.info(`[Cleanup] ${originalName || filename}: ${cleanup.usage.promptTokens + cleanup.usage.completionTokens} tokens, $${cleanupCost.toFixed(6)}`);
+
+        res.json({
+            status: 'success',
+            cleanTextFile: cleanFilename,
+            cleanupUsage: cleanup.usage,
+            cost: cleanupCost
+        });
+    } catch (error) {
+        logger.error('Cleanup error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Batch cleanup — creates a job for polling
+app.post('/api/cleanup-batch', express.json(), async (req, res) => {
+    try {
+        const { files } = req.body;
+        if (!files || !files.length) {
+            return res.status(400).json({ error: 'No files provided' });
+        }
+
+        const jobId = uuidv4();
+        const job = {
+            id: jobId,
+            type: 'cleanup',
+            files: files,
+            status: 'processing',
+            progress: 0,
+            completed: 0,
+            failed: 0,
+            total: files.length,
+            results: [],
+            createdAt: Date.now(),
+            messages: [{ text: 'Starting AI cleanup...', type: 'info' }]
+        };
+
+        jobs.set(jobId, job);
+
+        // Process cleanup asynchronously
+        (async () => {
+            try {
+                for (let i = 0; i < files.length; i++) {
+                    const file = files[i];
+                    job.messages.push({ text: `Cleaning: ${file.originalName || file.filename}`, type: 'processing' });
+
+                    try {
+                        const rawPath = path.join('uploads/texts', file.filename);
+                        if (!fs.existsSync(rawPath)) {
+                            throw new Error('Text file not found');
+                        }
+
+                        const rawText = await fs.promises.readFile(rawPath, 'utf8');
+                        const cleanup = await pdfProcessor.aiCleanupText(rawText, CLEANUP_MODEL);
+
+                        const cleanFilename = file.filename.replace(/\.txt$/, '.clean.txt');
+                        const cleanPath = path.join('uploads/texts', cleanFilename);
+                        await fs.promises.writeFile(cleanPath, cleanup.text, 'utf8');
+
+                        const cleanupCost = (cleanup.usage.promptTokens * CLEANUP_PRICING.inputPerMillion
+                            + cleanup.usage.completionTokens * CLEANUP_PRICING.outputPerMillion) / 1_000_000;
+
+                        // Update history
+                        const entry = history.findByTextFilename(file.filename);
+                        if (entry) {
+                            entry.cleanTextFilename = cleanFilename;
+                            entry.cleanupCost = cleanupCost;
+                            entry.cost = (entry.cost || 0) + cleanupCost;
+                            history.save();
+                        }
+
+                        job.results.push({
+                            originalName: file.originalName,
+                            filename: file.filename,
+                            cleanTextFile: cleanFilename,
+                            cleanupUsage: cleanup.usage,
+                            cost: cleanupCost,
+                            status: 'success'
+                        });
+                        job.completed++;
+                        job.messages.push({ text: `Cleaned: ${file.originalName || file.filename}`, type: 'success' });
+                    } catch (err) {
+                        job.results.push({
+                            originalName: file.originalName,
+                            filename: file.filename,
+                            status: 'error',
+                            error: err.message
+                        });
+                        job.failed++;
+                        job.messages.push({ text: `Cleanup failed: ${file.originalName || file.filename} - ${err.message}`, type: 'error' });
+                    }
+
+                    job.progress = Math.round(((i + 1) / files.length) * 100);
+                }
+
+                job.status = 'completed';
+                job.messages.push({ text: `Cleanup complete: ${job.completed} cleaned, ${job.failed} failed`, type: 'info' });
+            } catch (error) {
+                job.status = 'failed';
+                job.messages.push({ text: `Cleanup batch failed: ${error.message}`, type: 'error' });
+            }
+        })();
+
+        res.json({ jobId, status: 'processing', total: files.length });
+    } catch (error) {
+        logger.error('Batch cleanup error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Get server config (available models + pricing for frontend)
 app.get('/api/config', (req, res) => {
     res.json({
         models: AVAILABLE_MODELS,
-        defaultModel: AVAILABLE_MODELS[0].id
+        defaultModel: AVAILABLE_MODELS[0].id,
+        cleanupModel: CLEANUP_MODEL,
+        cleanupAvailable: !!process.env.OPENROUTER_API_KEY
     });
 });
 
@@ -547,7 +696,7 @@ async function processJob(jobId) {
 
                 if (result.status === 'success') {
                     job.completed++;
-                    // Save to persistent history — only vision has real API costs
+                    // Save to persistent history — only vision has real extraction costs
                     const pageCount = result.pageCount || 1;
                     const usage = result.usage || { promptTokens: 0, completionTokens: 0 };
                     const pricing = job.modelPricing;

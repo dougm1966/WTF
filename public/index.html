@@ -92,8 +92,6 @@
                 <div class="results-bar" id="resultsBar" style="display:none;">
                     <div id="resultsSummary" class="results-summary"></div>
                     <div class="results-actions">
-                        <button class="btn btn-sm btn-fill" id="downloadAllBtn"><i class="fas fa-download"></i> ZIP</button>
-                        <button class="btn btn-sm btn-ghost" id="clearAllBtn"><i class="fas fa-trash"></i> Clear</button>
                         <button class="btn btn-sm btn-ghost" id="newConversionBtn"><i class="fas fa-plus"></i> New</button>
                     </div>
                 </div>
@@ -104,15 +102,17 @@
                     <button class="btn btn-sm btn-fill" id="retryBtn"><i class="fas fa-redo"></i> Retry</button>
                 </div>
 
-                <!-- Convert bar — pinned to bottom -->
+                <!-- Bottom bar — pinned to bottom -->
                 <div class="convert-bar" id="convertBar">
                     <div class="convert-bar-model">
-                        <span class="convert-bar-label"><i class="fas fa-robot"></i> Model</span>
+                        <span class="convert-bar-label"><i class="fas fa-robot"></i> Model <span style="font-weight:400;color:#999;font-size:0.62rem;">(for AI Vision)</span></span>
                         <select id="modelSelect" class="convert-bar-select"></select>
                     </div>
                     <div class="convert-bar-actions" id="actionBar" style="display:none;">
-                        <button class="btn btn-sm btn-fill" id="convertBtn"><i class="fas fa-bolt"></i> Convert</button>
-                        <button class="btn btn-sm convert-bar-clear" id="clearBtn" title="Clear files"><i class="fas fa-trash"></i></button>
+                        <button class="batch-btn convert-all" id="convertAllBtn" title="Convert all files"><i class="fas fa-bolt"></i> Convert All</button>
+                        <button class="batch-btn cleanup-all" id="cleanupAllBtn" title="AI Cleanup all converted files" disabled><i class="fas fa-sparkles"></i> Cleanup All</button>
+                        <button class="batch-btn zip-all" id="downloadAllBtn" title="Download all as ZIP" disabled><i class="fas fa-file-zipper"></i> ZIP</button>
+                        <button class="batch-btn clear-all" id="clearAllBtn" title="Clear all files"><i class="fas fa-trash"></i></button>
                     </div>
                 </div>
             </div>
@@ -130,6 +130,10 @@
                 <div class="preview-content" id="previewContent" style="display:none;">
                     <div class="preview-header">
                         <span class="preview-filename" id="previewFilename"></span>
+                        <div class="preview-toggle" id="previewToggle" style="display:none;">
+                            <button class="preview-toggle-btn active" data-mode="cleaned">Cleaned</button>
+                            <button class="preview-toggle-btn" data-mode="raw">Raw</button>
+                        </div>
                         <a class="btn btn-sm btn-ghost" id="previewDownload" download><i class="fas fa-download"></i></a>
                     </div>
                     <pre class="preview-body" id="previewBody"></pre>

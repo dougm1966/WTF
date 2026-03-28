@@ -57,6 +57,14 @@ class HistoryStore {
         return this.data.entries.find(e => e.id === id);
     }
 
+    findByTextFilename(textFilename) {
+        return this.data.entries.find(e => e.textFilename === textFilename);
+    }
+
+    save() {
+        this._save();
+    }
+
     remove(id, textsDir) {
         const entry = this.getById(id);
         if (!entry) return false;

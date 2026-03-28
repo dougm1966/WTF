@@ -7,6 +7,23 @@ const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 
+const CLEANUP_SYSTEM_PROMPT = `You are a text formatting assistant. Clean up raw text extracted from a PDF for use in a RAG (Retrieval-Augmented Generation) knowledge base.
+
+Rules:
+- PRESERVE all factual content, names, numbers, dates, and meaning exactly
+- REMOVE visual artifacts: decorative lines (----, ====, ____), bullet symbols (●, ■, ▪, ►, ◆), ornamental characters, page numbers, headers/footers repeated on every page, watermark text
+- REMOVE page break markers like "--- PAGE N ---" or "--- PAGE BREAK ---"
+- FIX broken words split across lines (e.g., "docu-\\nment" → "document")
+- FIX obvious OCR garble where the intended word is clear
+- CONVERT broken tables into clear "Label: Value" format
+- FORMAT as clean paragraphs with markdown ## headers where sections are apparent
+- JOIN sentence fragments split by line breaks into flowing paragraphs
+- DO NOT add information not in the original
+- DO NOT summarize or omit content
+- DO NOT add commentary about the cleanup
+
+Return ONLY the cleaned text.`;
+
 class EnhancedPDFProcessor {
     constructor(options = {}) {
         this.concurrency = options.concurrency || 3;
@@ -181,6 +198,105 @@ class EnhancedPDFProcessor {
                 throw error;
             }
         }
+    }
+
+    // ─── AI Text Cleanup ───
+
+    async callTextAPI(text, systemPrompt, model) {
+        const body = {
+            model: model || 'google/gemini-flash-2.0',
+            messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: text }
+            ],
+            max_tokens: 8000
+        };
+
+        const maxRetries = 3;
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+                const response = await fetch(`${this.visionBaseURL}/chat/completions`, {
+                    method: 'POST',
+                    headers: this.visionHeaders,
+                    body: JSON.stringify(body)
+                });
+
+                if (!response.ok) {
+                    const errorText = await response.text().catch(() => 'unknown');
+                    const status = response.status;
+                    const retryable = [429, 500, 502, 503, 504].includes(status);
+
+                    if (retryable && attempt < maxRetries) {
+                        const delay = Math.min(1000 * Math.pow(2, attempt), 10000) + Math.random() * 500;
+                        this.logger.warn(`[TextAPI] ${status}, retry ${attempt + 1}/${maxRetries} in ${Math.round(delay)}ms`);
+                        await new Promise(r => setTimeout(r, delay));
+                        continue;
+                    }
+                    const err = new Error(`API ${status}: ${errorText.substring(0, 200)}`);
+                    err.status = status;
+                    throw err;
+                }
+
+                const data = await response.json();
+                return {
+                    text: data.choices?.[0]?.message?.content || '',
+                    promptTokens: data.usage?.prompt_tokens || 0,
+                    completionTokens: data.usage?.completion_tokens || 0
+                };
+
+            } catch (error) {
+                const isClientError = error.status && error.status >= 400 && error.status < 500 && error.status !== 429;
+                if (attempt < maxRetries && error.name !== 'AbortError' && !isClientError) {
+                    const delay = Math.min(1000 * Math.pow(2, attempt), 10000) + Math.random() * 500;
+                    this.logger.warn(`[TextAPI] Error "${error.message}", retry ${attempt + 1}/${maxRetries} in ${Math.round(delay)}ms`);
+                    await new Promise(r => setTimeout(r, delay));
+                    continue;
+                }
+                throw error;
+            }
+        }
+    }
+
+    async aiCleanupText(text, model) {
+        const CHUNK_CHAR_LIMIT = 12000;
+        const pagePattern = /---\s*PAGE\s+(?:BREAK|\d+)\s*---/g;
+
+        // Split into pages, then batch into chunks
+        const pages = text.split(pagePattern).filter(p => p.trim().length > 0);
+        const chunks = [];
+        let current = '';
+
+        for (const page of pages) {
+            if (current.length + page.length > CHUNK_CHAR_LIMIT && current.length > 0) {
+                chunks.push(current);
+                current = page;
+            } else {
+                current += (current ? '\n\n' : '') + page;
+            }
+        }
+        if (current.trim()) chunks.push(current);
+
+        // If no chunks (empty text), return as-is
+        if (chunks.length === 0) return { text, usage: { promptTokens: 0, completionTokens: 0 } };
+
+        this.logger.info(`[AICleanup] Processing ${chunks.length} chunk(s) with ${model || 'default model'}`);
+
+        let totalPromptTokens = 0;
+        let totalCompletionTokens = 0;
+        const cleanedChunks = [];
+
+        for (let i = 0; i < chunks.length; i++) {
+            this.logger.info(`[AICleanup] Chunk ${i + 1}/${chunks.length} (${chunks[i].length} chars)`);
+            const result = await this.callTextAPI(chunks[i], CLEANUP_SYSTEM_PROMPT, model);
+            cleanedChunks.push(result.text);
+            totalPromptTokens += result.promptTokens;
+            totalCompletionTokens += result.completionTokens;
+        }
+
+        return {
+            text: cleanedChunks.join('\n\n'),
+            usage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens }
+        };
     }
 
     // ─── Dependency Health Check ───
@@ -387,12 +503,15 @@ class EnhancedPDFProcessor {
 
             result.quality = this.assessExtractionQuality(extractionResult.text, result.extractionMethod);
             const cleanedText = this.cleanExtractedText(extractionResult.text);
+
             const textFilename = this.generateTextFilename(originalName);
             const textFilePath = path.join(this.outputDir, textFilename);
             await fs.writeFile(textFilePath, cleanedText, 'utf8');
 
             result.status = 'success';
             result.textFile = textFilename;
+            result.cleanTextFile = null;
+            result.cleanupApplied = false;
             result.textContent = cleanedText;
             result.pageCount = extractionResult.numpages || 1;
             result.processingTime = Date.now() - startTime;

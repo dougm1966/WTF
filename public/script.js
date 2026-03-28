@@ -69,13 +69,22 @@ class UsageTracker {
 class PDFConverter {
     constructor() {
         this.files = [];
-        this.currentJobId = null;
-        this.conversionResults = [];
-        this.convertedMap = new Map(); // originalName → { textFile, status, cost }
+        this.convertedMap = new Map(); // originalName → { textFile, cleanTextFile, status, cost, cleanupStatus }
         this.activePreview = null;
+        this.previewTextCache = {}; // { raw: string, cleaned: string }
+        this.previewMode = 'cleaned'; // 'raw' or 'cleaned'
         this.availableModels = [];
         this.selectedModel = 'google/gemini-flash-2.0';
         this.usageTracker = new UsageTracker();
+
+        // Classification state
+        this.classificationId = null;
+        this.classifiedFiles = { text: [], ocr: [], vision: [] };
+        this.serverFileMap = {}; // originalName → { filename, size, pageCount, classification }
+        this.groupJobs = {};     // groupName → jobId
+        this.groupStatus = {};   // groupName → 'idle' | 'converting' | 'done'
+        this.groupPollers = {};  // groupName → timeout id
+
         this.initElements();
         this.attachEvents();
         this.updateStats();
@@ -102,8 +111,8 @@ class PDFConverter {
         this.errorArea = document.getElementById('errorArea');
         this.errorMessage = document.getElementById('errorMessage');
 
-        this.convertBtn = document.getElementById('convertBtn');
-        this.clearBtn = document.getElementById('clearBtn');
+        this.convertAllBtn = document.getElementById('convertAllBtn');
+        this.cleanupAllBtn = document.getElementById('cleanupAllBtn');
         this.downloadAllBtn = document.getElementById('downloadAllBtn');
         this.clearAllBtn = document.getElementById('clearAllBtn');
         this.newConversionBtn = document.getElementById('newConversionBtn');
@@ -124,6 +133,7 @@ class PDFConverter {
         this.previewFilename = document.getElementById('previewFilename');
         this.previewBody = document.getElementById('previewBody');
         this.previewDownload = document.getElementById('previewDownload');
+        this.previewToggle = document.getElementById('previewToggle');
     }
 
     attachEvents() {
@@ -147,13 +157,25 @@ class PDFConverter {
             });
         }
 
-        this.convertBtn.addEventListener('click', () => this.startConversion());
-        this.clearBtn.addEventListener('click', () => this.clearFiles());
-        this.downloadAllBtn.addEventListener('click', () => this.downloadAllFiles());
+        if (this.convertAllBtn) this.convertAllBtn.addEventListener('click', () => this.convertAll());
+        if (this.cleanupAllBtn) this.cleanupAllBtn.addEventListener('click', () => this.cleanupAll());
+        if (this.downloadAllBtn) this.downloadAllBtn.addEventListener('click', () => this.downloadAllFiles());
         if (this.clearAllBtn) this.clearAllBtn.addEventListener('click', () => this.clearFiles());
-        this.newConversionBtn.addEventListener('click', () => this.resetApp());
-        this.retryBtn.addEventListener('click', () => this.resetApp());
-        this.resetStatsBtn.addEventListener('click', () => { this.usageTracker.reset(); this.updateStats(); });
+        if (this.newConversionBtn) this.newConversionBtn.addEventListener('click', () => this.resetApp());
+        if (this.retryBtn) this.retryBtn.addEventListener('click', () => this.resetApp());
+        if (this.resetStatsBtn) this.resetStatsBtn.addEventListener('click', () => { this.usageTracker.reset(); this.updateStats(); });
+
+        // Preview toggle
+        if (this.previewToggle) {
+            this.previewToggle.querySelectorAll('.preview-toggle-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    this.previewMode = btn.dataset.mode;
+                    this.previewToggle.querySelectorAll('.preview-toggle-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    this.updatePreviewContent();
+                });
+            });
+        }
     }
 
     // ── Drag & Drop ──
@@ -194,64 +216,401 @@ class PDFConverter {
             this.showWorkingView();
         }
 
-        this.renderFileList();
         this.fileInput.value = '';
+        this.classifyFiles(valid);
     }
 
-    renderFileList() {
-        // Show/hide file area and action bar
-        const hasFiles = this.files.length > 0;
-        this.fileArea.style.display = hasFiles ? 'flex' : 'none';
-        this.actionBar.style.display = hasFiles ? 'flex' : 'none';
+    // ── Classification Flow ──
+    async classifyFiles(newFiles) {
+        this.fileArea.style.display = 'flex';
+        this.actionBar.style.display = 'none';
+        this.errorArea.style.display = 'none';
 
-        this.fileList.innerHTML = '';
-        this.files.forEach((f, i) => {
-            const converted = this.convertedMap.get(f.name);
-            const el = document.createElement('div');
-            el.className = 'file-item fade-in';
+        // Show classifying spinner
+        this.fileList.innerHTML = `
+            <div class="classifying-overlay">
+                <i class="fas fa-circle-notch fa-spin"></i>
+                <p>Analyzing files...</p>
+            </div>`;
 
-            let icon = 'fa-file-pdf';
-            if (converted) {
-                icon = converted.status === 'success' ? 'fa-check-circle' : 'fa-times-circle';
-                if (converted.status === 'success') el.classList.add('clickable');
-                if (this.activePreview === f.name) el.classList.add('active');
+        try {
+            const fd = new FormData();
+            newFiles.forEach(f => fd.append('pdfs', f));
+
+            const res = await fetch('/api/classify', { method: 'POST', body: fd });
+            if (!res.ok) throw new Error(`Classification failed: ${res.statusText}`);
+
+            const data = await res.json();
+            this.classificationId = data.classificationId;
+
+            // Merge new classifications into existing groups
+            for (const file of data.files) {
+                // Remove from any existing group (in case of re-upload)
+                for (const group of ['text', 'ocr', 'vision']) {
+                    this.classifiedFiles[group] = this.classifiedFiles[group].filter(
+                        f => f.originalName !== file.originalName
+                    );
+                }
+                this.serverFileMap[file.originalName] = file;
+                this.classifiedFiles[file.classification].push(file);
             }
 
-            el.innerHTML = `
-                <div class="file-info-item">
-                    <i class="fas ${icon}"></i>
-                    <div class="file-name">${f.name}</div>
-                </div>
-                <div class="file-cost-col">
-                    ${this.fmtSize(f.size)}${converted ? ` · <span class="file-cost">${this.fmtCost(converted.cost)}</span>` : ''}
-                </div>
-                ${converted && converted.status === 'success' ? `<a class="file-dl-btn" href="/api/download/${converted.textFile}" download title="Download text"><i class="fas fa-download"></i></a>` : ''}
-                ${!converted ? `<button class="remove-file" data-i="${i}"><i class="fas fa-times"></i></button>` : ''}`;
-
-            if (!converted) {
-                const rmBtn = el.querySelector('.remove-file');
-                if (rmBtn) rmBtn.addEventListener('click', () => this.removeFile(i));
-            }
-
-            if (converted && converted.status === 'success') {
-                el.addEventListener('click', () => this.previewFile(converted.textFile, f.name));
-            }
-
-            this.fileList.appendChild(el);
-        });
-    }
-
-    removeFile(i) {
-        this.files.splice(i, 1);
-        if (!this.files.length) {
-            this.showLandingView();
+            this.renderGroupedFileList();
+        } catch (err) {
+            this.showError(err.message);
         }
-        this.renderFileList();
+    }
+
+    // ── Grouped File List ──
+    renderGroupedFileList() {
+        this.fileArea.style.display = 'flex';
+        this.fileList.innerHTML = '';
+
+        const groups = [
+            { key: 'text', label: 'Text-Based', icon: 'fa-file-lines', badge: 'free', badgeClass: 'free' },
+            { key: 'ocr', label: 'OCR', icon: 'fa-eye', badge: 'free', badgeClass: 'free' },
+            { key: 'vision', label: 'AI Vision', icon: 'fa-brain', badge: '$ paid', badgeClass: 'paid' }
+        ];
+
+        for (const g of groups) {
+            const files = this.classifiedFiles[g.key];
+            if (!files.length) continue;
+
+            const status = this.groupStatus[g.key] || 'idle';
+            const groupEl = document.createElement('div');
+            groupEl.className = `file-group group-${g.key} fade-in`;
+
+            // Header
+            const header = document.createElement('div');
+            header.className = 'file-group-header';
+            header.innerHTML = `
+                <div class="file-group-title">
+                    <i class="fas ${g.icon}"></i>
+                    ${g.label} (${files.length})
+                </div>
+                <span class="file-group-badge ${g.badgeClass}">${g.badge}</span>
+                <div class="file-group-right">
+                    ${status === 'idle' ? `<button class="file-group-convert" data-group="${g.key}"><i class="fas fa-bolt"></i> Convert</button>` : ''}
+                    ${status === 'converting' ? '<span style="font-size:0.72rem;color:#667eea;"><i class="fas fa-spinner fa-spin"></i> Converting...</span>' : ''}
+                    ${status === 'done' ? '<span style="font-size:0.72rem;color:#28a745;"><i class="fas fa-check"></i> Done</span>' : ''}
+                </div>`;
+            groupEl.appendChild(header);
+
+            // File list body
+            const body = document.createElement('div');
+            body.className = 'file-group-body';
+
+            files.forEach(file => {
+                const converted = this.convertedMap.get(file.originalName);
+                const el = document.createElement('div');
+                el.className = 'file-item';
+
+                // Determine icon based on state
+                let icon = 'fa-file-pdf';
+                let iconStyle = '';
+                if (converted && converted.status === 'success') {
+                    if (converted.cleanTextFile) {
+                        icon = 'fa-sparkles';
+                        iconStyle = 'color:#667eea;';
+                    } else {
+                        icon = 'fa-check-circle';
+                        iconStyle = 'color:#28a745;';
+                    }
+                    el.classList.add('clickable');
+                    if (this.activePreview === file.originalName) el.classList.add('active');
+                } else if (converted && converted.status === 'error') {
+                    icon = 'fa-times-circle';
+                    iconStyle = 'color:#dc3545;';
+                }
+
+                // Build state badge
+                let badgeHtml = '';
+                if (converted && converted.status === 'success') {
+                    if (converted.cleanTextFile) {
+                        badgeHtml = '<span class="file-badge badge-cleaned"><i class="fas fa-sparkles"></i> Cleaned</span>';
+                    } else if (converted.cleanupStatus === 'cleaning') {
+                        badgeHtml = '<span class="file-badge badge-cleaning"><i class="fas fa-spinner"></i> Cleaning...</span>';
+                    } else {
+                        badgeHtml = '<span class="file-badge badge-converted">Converted</span>';
+                    }
+                }
+
+                // Build per-file action buttons
+                let actionsHtml = '';
+                if (converted && converted.status === 'success') {
+                    // Cleanup button: active if converted but not cleaned and not currently cleaning
+                    if (!converted.cleanTextFile && converted.cleanupStatus !== 'cleaning') {
+                        actionsHtml += `<button class="file-action-btn cleanup-btn" data-file="${file.originalName}" data-textfile="${converted.textFile}"><i class="fas fa-sparkles"></i> Cleanup</button>`;
+                    } else if (converted.cleanupStatus === 'cleaning') {
+                        actionsHtml += `<button class="file-action-btn cleaning-btn" disabled><i class="fas fa-spinner"></i> Cleaning...</button>`;
+                    }
+                    // Download button
+                    const dlFile = converted.cleanTextFile || converted.textFile;
+                    actionsHtml += `<a class="file-action-btn dl-btn" href="/api/download/${dlFile}" download title="Download"><i class="fas fa-download"></i></a>`;
+                } else if (!converted) {
+                    // Disabled cleanup button (teaches feature exists)
+                    actionsHtml += `<button class="file-action-btn cleanup-btn" disabled><i class="fas fa-sparkles"></i> Cleanup</button>`;
+                }
+
+                // Build move buttons (to the other two groups)
+                const otherGroups = ['text', 'ocr', 'vision'].filter(k => k !== g.key);
+                const moveLabels = { text: 'Text', ocr: 'OCR', vision: 'Vision' };
+                const moveBtnsHtml = !converted && status === 'idle' ? otherGroups.map(og =>
+                    `<button class="file-move-btn" data-from="${g.key}" data-to="${og}" data-file="${file.originalName}">${moveLabels[og]}</button>`
+                ).join('') : '';
+
+                el.innerHTML = `
+                    <div class="file-info-item">
+                        <i class="fas ${icon}" style="${iconStyle}"></i>
+                        <div>
+                            <div class="file-name">${file.originalName}</div>
+                            <div class="file-size">${this.fmtSize(file.size)} · ${file.pageCount} pg${converted && converted.cost ? ` · <span style="color:#667eea;font-weight:500;">${this.fmtCost(converted.cost)}</span>` : ''} ${badgeHtml}</div>
+                        </div>
+                    </div>
+                    <div class="file-actions">
+                        ${actionsHtml}
+                        ${moveBtnsHtml ? `<span class="file-move-btns">${moveBtnsHtml}</span>` : ''}
+                        ${!converted && status === 'idle' ? `<button class="remove-file" data-group="${g.key}" data-file="${file.originalName}"><i class="fas fa-times"></i></button>` : ''}
+                    </div>`;
+
+                body.appendChild(el);
+            });
+
+            groupEl.appendChild(body);
+
+            // Per-group progress bar
+            if (status === 'converting') {
+                const prog = document.createElement('div');
+                prog.className = 'file-group-progress';
+                prog.id = `group-progress-${g.key}`;
+                prog.innerHTML = `
+                    <div class="progress-row">
+                        <span class="progress-label"><i class="fas fa-spinner fa-spin"></i> Converting...</span>
+                        <span class="progress-pct" id="group-pct-${g.key}">0%</span>
+                    </div>
+                    <div class="progress-track">
+                        <div class="progress-fill" id="group-fill-${g.key}"></div>
+                    </div>`;
+                groupEl.appendChild(prog);
+            }
+
+            this.fileList.appendChild(groupEl);
+        }
+
+        // Attach event listeners
+        this.fileList.querySelectorAll('.file-group-convert').forEach(btn => {
+            btn.addEventListener('click', () => this.startGroupConversion(btn.dataset.group));
+        });
+
+        this.fileList.querySelectorAll('.file-move-btn').forEach(btn => {
+            btn.addEventListener('click', () => this.moveFile(btn.dataset.from, btn.dataset.to, btn.dataset.file));
+        });
+
+        this.fileList.querySelectorAll('.remove-file').forEach(btn => {
+            btn.addEventListener('click', () => this.removeClassifiedFile(btn.dataset.group, btn.dataset.file));
+        });
+
+        // Per-file cleanup buttons
+        this.fileList.querySelectorAll('.file-action-btn.cleanup-btn:not(:disabled)').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.cleanupFile(btn.dataset.textfile, btn.dataset.file);
+            });
+        });
+
+        // Attach preview click handlers for converted files
+        this.fileList.querySelectorAll('.file-item.clickable').forEach(el => {
+            const nameEl = el.querySelector('.file-name');
+            if (nameEl) {
+                const name = nameEl.textContent;
+                const converted = this.convertedMap.get(name);
+                if (converted) {
+                    el.addEventListener('click', (e) => {
+                        if (e.target.closest('.file-actions')) return; // Don't preview when clicking action buttons
+                        this.previewFile(converted.textFile, name, converted.cleanTextFile);
+                    });
+                }
+            }
+        });
+
+        // Show action bar and update batch button states
+        this.actionBar.style.display = 'flex';
+        this.updateBatchButtons();
+    }
+
+    moveFile(fromGroup, toGroup, fileName) {
+        const idx = this.classifiedFiles[fromGroup].findIndex(f => f.originalName === fileName);
+        if (idx === -1) return;
+        const [file] = this.classifiedFiles[fromGroup].splice(idx, 1);
+        file.classification = toGroup;
+        this.classifiedFiles[toGroup].push(file);
+        this.renderGroupedFileList();
+    }
+
+    removeClassifiedFile(group, fileName) {
+        this.classifiedFiles[group] = this.classifiedFiles[group].filter(f => f.originalName !== fileName);
+        this.files = this.files.filter(f => f.name !== fileName);
+        delete this.serverFileMap[fileName];
+
+        // If no files left in any group, go back to landing
+        const totalFiles = this.classifiedFiles.text.length + this.classifiedFiles.ocr.length + this.classifiedFiles.vision.length;
+        if (totalFiles === 0) {
+            this.showLandingView();
+            return;
+        }
+
+        this.renderGroupedFileList();
+    }
+
+    // ── Per-Group Conversion ──
+    async startGroupConversion(groupName) {
+        const files = this.classifiedFiles[groupName];
+        if (!files.length) return;
+
+        this.groupStatus[groupName] = 'converting';
+        this.renderGroupedFileList();
+
+        try {
+            const res = await fetch('/api/convert-group', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    classificationId: this.classificationId,
+                    files: files.map(f => ({ filename: f.filename, originalName: f.originalName })),
+                    model: this.selectedModel,
+                    forceMethod: groupName
+                })
+            });
+
+            if (!res.ok) throw new Error(`Conversion failed: ${res.statusText}`);
+
+            const data = await res.json();
+            this.groupJobs[groupName] = data.jobId;
+            this.pollGroupProgress(groupName);
+        } catch (err) {
+            this.groupStatus[groupName] = 'idle';
+            this.renderGroupedFileList();
+            this.notify(err.message, 'error');
+        }
+    }
+
+    async pollGroupProgress(groupName) {
+        const jobId = this.groupJobs[groupName];
+        if (!jobId) return;
+
+        try {
+            const res = await fetch(`/api/status/${jobId}`);
+            if (!res.ok) throw new Error('Status check failed');
+            const status = await res.json();
+
+            // Update inline progress bar
+            const fillEl = document.getElementById(`group-fill-${groupName}`);
+            const pctEl = document.getElementById(`group-pct-${groupName}`);
+            if (fillEl) fillEl.style.width = `${status.progress || 0}%`;
+            if (pctEl) pctEl.textContent = `${status.progress || 0}%`;
+
+            if (status.status === 'completed') {
+                await this.fetchGroupResults(groupName);
+            } else if (status.status === 'failed') {
+                this.groupStatus[groupName] = 'idle';
+                this.renderGroupedFileList();
+                this.notify(`${groupName} conversion failed`, 'error');
+            } else {
+                this.groupPollers[groupName] = setTimeout(() => this.pollGroupProgress(groupName), 1000);
+            }
+        } catch (err) {
+            this.groupStatus[groupName] = 'idle';
+            this.renderGroupedFileList();
+            this.notify(err.message, 'error');
+        }
+    }
+
+    async fetchGroupResults(groupName) {
+        const jobId = this.groupJobs[groupName];
+        try {
+            const res = await fetch(`/api/results/${jobId}`);
+            if (!res.ok) throw new Error('Failed to fetch results');
+            const results = await res.json();
+
+            // Record usage
+            this.usageTracker.recordConversion(results);
+            this.updateStats();
+
+            // Update converted map
+            results.forEach(r => {
+                this.convertedMap.set(r.originalName, {
+                    status: r.status,
+                    textFile: r.textFile || null,
+                    cleanTextFile: r.cleanTextFile || null,
+                    cleanupStatus: null,
+                    cost: r.cost || 0
+                });
+            });
+
+            this.groupStatus[groupName] = 'done';
+            this.renderGroupedFileList();
+
+            // Show results bar
+            this.updateResultsBar();
+
+            // Auto-preview first successful file from this group
+            const firstOk = results.find(r => r.status === 'success');
+            if (firstOk) {
+                this.previewFile(firstOk.textFile, firstOk.originalName);
+            }
+        } catch (err) {
+            this.notify(err.message, 'error');
+        }
+    }
+
+    updateResultsBar() {
+        const allConverted = [...this.convertedMap.values()];
+        if (!allConverted.length) return;
+
+        const ok = allConverted.filter(r => r.status === 'success').length;
+        const fail = allConverted.filter(r => r.status === 'error').length;
+        const totalCost = allConverted.reduce((sum, r) => sum + (r.cost || 0), 0);
+
+        this.resultsSummary.innerHTML = `
+            <span class="result-stat success"><i class="fas fa-check"></i> ${ok} converted</span>
+            ${fail ? `<span class="result-stat error"><i class="fas fa-times"></i> ${fail} failed</span>` : ''}
+            <span class="result-stat cost"><i class="fas fa-dollar-sign"></i> $${totalCost.toFixed(4)}</span>`;
+
+        this.resultsBar.style.display = 'flex';
+    }
+
+    async downloadAllFiles() {
+        // Find any completed job to download from
+        const completedJobId = Object.values(this.groupJobs).find(id => id);
+        if (!completedJobId) { this.notify('No files to download', 'error'); return; }
+
+        try {
+            const res = await fetch(`/api/download/batch/${completedJobId}`);
+            if (!res.ok) throw new Error('Download failed');
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `converted-${Date.now()}.zip`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        } catch (err) {
+            this.notify(err.message, 'error');
+        }
     }
 
     clearFiles() {
         this.files = [];
         this.convertedMap.clear();
+        this.classificationId = null;
+        this.classifiedFiles = { text: [], ocr: [], vision: [] };
+        this.serverFileMap = {};
+        this.groupJobs = {};
+        this.groupStatus = {};
+        for (const id of Object.values(this.groupPollers)) clearTimeout(id);
+        this.groupPollers = {};
         this.fileInput.value = '';
         this.fileArea.style.display = 'none';
         this.actionBar.style.display = 'none';
@@ -283,164 +642,246 @@ class PDFConverter {
         return (!cost || cost === 0) ? 'Free' : '$' + cost.toFixed(4);
     }
 
-    // ── Conversion Flow ──
-    async startConversion() {
-        if (!this.files.length) { this.notify('Add files first', 'error'); return; }
-
-        // Show progress, hide results/error
-        this.progressArea.style.display = 'flex';
-        this.resultsBar.style.display = 'none';
-        this.errorArea.style.display = 'none';
-        this.actionBar.style.display = 'none';
-        this.statusMessages.innerHTML = '';
-        this.progressFill.style.width = '0%';
-        this.progressText.textContent = '0%';
-        this.showLoading(true);
-
-        try {
-            const fd = new FormData();
-            this.files.forEach(f => fd.append('pdfs', f));
-            fd.append('model', this.selectedModel);
-
-            const res = await fetch('/api/upload', { method: 'POST', body: fd });
-            if (!res.ok) throw new Error(`Upload failed: ${res.statusText}`);
-
-            const data = await res.json();
-            this.currentJobId = data.jobId;
-            this.pollProgress();
-        } catch (err) {
-            this.showError(err.message);
-            this.showLoading(false);
-        }
-    }
-
-    async pollProgress() {
-        if (!this.currentJobId) return;
-        try {
-            const res = await fetch(`/api/status/${this.currentJobId}`);
-            if (!res.ok) throw new Error('Status check failed');
-            const status = await res.json();
-            this.updateProgress(status);
-
-            if (status.status === 'completed') { await this.fetchResults(); }
-            else if (status.status === 'failed') { this.showError('Conversion failed.'); this.showLoading(false); }
-            else { setTimeout(() => this.pollProgress(), 1000); }
-        } catch (err) {
-            this.showError(err.message);
-            this.showLoading(false);
-        }
-    }
-
-    updateProgress(status) {
-        const pct = status.progress || 0;
-        this.progressFill.style.width = `${pct}%`;
-        this.progressText.textContent = `${pct}%`;
-        if (status.currentFile) this.addLog(`Processing: ${status.currentFile}`, 'processing');
-        status.messages?.forEach(m => this.addLog(m.text, m.type));
-    }
-
-    addLog(msg, type = 'info') {
-        const el = document.createElement('div');
-        el.className = `status-message ${type}`;
-        el.textContent = msg;
-        this.statusMessages.appendChild(el);
-        this.statusMessages.scrollTop = this.statusMessages.scrollHeight;
-        if (this.statusMessages.children.length > 50) this.statusMessages.removeChild(this.statusMessages.firstChild);
-    }
-
-    async fetchResults() {
-        try {
-            const res = await fetch(`/api/results/${this.currentJobId}`);
-            if (!res.ok) throw new Error('Failed to fetch results');
-            this.conversionResults = await res.json();
-            this.showResults();
-            this.showLoading(false);
-        } catch (err) {
-            this.showError(err.message);
-            this.showLoading(false);
-        }
-    }
-
-    showResults() {
-        const ok = this.conversionResults.filter(r => r.status === 'success');
-        const fail = this.conversionResults.filter(r => r.status === 'error');
-
-        // Record usage from actual server results
-        const conv = this.usageTracker.recordConversion(this.conversionResults);
-        this.updateStats();
-
-        // Build converted map for file list status indicators
-        this.conversionResults.forEach(r => {
-            this.convertedMap.set(r.originalName, {
-                status: r.status,
-                textFile: r.textFile || null,
-                cost: r.cost || 0
-            });
-        });
-
-        // Re-render file list with status icons
-        this.renderFileList();
-
-        // Summary bar
-        this.resultsSummary.innerHTML = `
-            <span class="result-stat success"><i class="fas fa-check"></i> ${ok.length} converted</span>
-            ${fail.length ? `<span class="result-stat error"><i class="fas fa-times"></i> ${fail.length} failed</span>` : ''}
-            <span class="result-stat cost"><i class="fas fa-dollar-sign"></i> $${conv.cost.toFixed(4)}</span>`;
-
-        this.progressArea.style.display = 'none';
-        this.resultsBar.style.display = 'flex';
-
-        // Auto-preview first successful file
-        if (ok.length > 0) {
-            this.previewFile(ok[0].textFile, ok[0].originalName);
-        }
-    }
-
-    async downloadAllFiles() {
-        try {
-            const res = await fetch(`/api/download/batch/${this.currentJobId}`);
-            if (!res.ok) throw new Error('Download failed');
-            const blob = await res.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `converted-${Date.now()}.zip`;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            URL.revokeObjectURL(url);
-        } catch (err) {
-            this.notify(err.message, 'error');
-        }
-    }
-
     // ── Text Preview ──
-    async previewFile(textFilename, originalName) {
+    async previewFile(textFilename, originalName, cleanTextFile) {
         if (!textFilename) return;
         this.activePreview = originalName;
-        this.renderFileList(); // update active highlight
+        this.previewTextCache = {};
+        this.renderGroupedFileList(); // update active highlight
 
         this.previewFilename.textContent = originalName.replace(/\.pdf$/i, '.txt');
         this.previewBody.textContent = 'Loading...';
         this.previewEmpty.style.display = 'none';
         this.previewContent.style.display = 'flex';
-        this.previewDownload.href = `/api/download/${textFilename}`;
 
+        // Show/hide toggle based on whether cleaned version exists
+        if (cleanTextFile && this.previewToggle) {
+            this.previewToggle.style.display = 'flex';
+            this.previewMode = 'cleaned';
+            this.previewToggle.querySelectorAll('.preview-toggle-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.mode === 'cleaned');
+            });
+        } else if (this.previewToggle) {
+            this.previewToggle.style.display = 'none';
+            this.previewMode = 'raw';
+        }
+
+        // Load raw text
         try {
             const res = await fetch(`/api/download/${textFilename}`);
             if (!res.ok) throw new Error('Failed to load preview');
-            const text = await res.text();
-            this.previewBody.textContent = text || '(empty file)';
+            this.previewTextCache.raw = await res.text();
         } catch (err) {
-            this.previewBody.textContent = `Error loading preview: ${err.message}`;
+            this.previewTextCache.raw = `Error loading preview: ${err.message}`;
+        }
+
+        // Load cleaned text if available
+        if (cleanTextFile) {
+            try {
+                const res = await fetch(`/api/download/${cleanTextFile}`);
+                if (res.ok) {
+                    this.previewTextCache.cleaned = await res.text();
+                }
+            } catch (err) { /* fall back to raw */ }
+        }
+
+        this.updatePreviewContent();
+    }
+
+    updatePreviewContent() {
+        const text = this.previewMode === 'cleaned' && this.previewTextCache.cleaned
+            ? this.previewTextCache.cleaned
+            : this.previewTextCache.raw;
+        this.previewBody.textContent = text || '(empty file)';
+
+        // Update download link to match current mode
+        const converted = this.activePreview ? this.convertedMap.get(this.activePreview) : null;
+        if (converted) {
+            const dlFile = (this.previewMode === 'cleaned' && converted.cleanTextFile) || converted.textFile;
+            this.previewDownload.href = `/api/download/${dlFile}`;
         }
     }
 
     hidePreview() {
         this.activePreview = null;
+        this.previewTextCache = {};
         this.previewEmpty.style.display = 'flex';
         this.previewContent.style.display = 'none';
         this.previewBody.textContent = '';
+        if (this.previewToggle) this.previewToggle.style.display = 'none';
+    }
+
+    // ── Per-File Cleanup ──
+    async cleanupFile(textFilename, originalName) {
+        const entry = this.convertedMap.get(originalName);
+        if (!entry || entry.cleanupStatus === 'cleaning') return;
+
+        entry.cleanupStatus = 'cleaning';
+        this.renderGroupedFileList();
+
+        try {
+            const res = await fetch('/api/cleanup', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filename: textFilename, originalName })
+            });
+            if (!res.ok) throw new Error(`Cleanup failed: ${res.statusText}`);
+
+            const data = await res.json();
+            entry.cleanTextFile = data.cleanTextFile;
+            entry.cleanupStatus = null;
+            entry.cost = (entry.cost || 0) + (data.cost || 0);
+
+            // Track usage
+            this.usageTracker.data.cost += data.cost || 0;
+            this.usageTracker._save();
+            this.updateStats();
+
+            this.renderGroupedFileList();
+            this.updateResultsBar();
+
+            // If this file is currently previewed, refresh preview
+            if (this.activePreview === originalName) {
+                this.previewFile(entry.textFile, originalName, entry.cleanTextFile);
+            }
+        } catch (err) {
+            entry.cleanupStatus = null;
+            this.renderGroupedFileList();
+            this.notify(err.message, 'error');
+        }
+    }
+
+    // ── Batch Operations ──
+    async convertAll() {
+        const groupOrder = ['text', 'ocr', 'vision'];
+        for (const g of groupOrder) {
+            if (this.classifiedFiles[g].length > 0 && this.groupStatus[g] !== 'done') {
+                await this.startGroupConversionAndWait(g);
+            }
+        }
+    }
+
+    startGroupConversionAndWait(groupName) {
+        return new Promise((resolve) => {
+            const origFetch = this.fetchGroupResults.bind(this);
+            const self = this;
+
+            // Temporarily wrap fetchGroupResults to resolve when done
+            this.fetchGroupResults = async function(gn) {
+                await origFetch(gn);
+                self.fetchGroupResults = origFetch; // restore
+                if (gn === groupName) resolve();
+            };
+
+            this.startGroupConversion(groupName);
+        });
+    }
+
+    async cleanupAll() {
+        // Collect all converted-but-uncleaned files
+        const filesToClean = [];
+        for (const [name, entry] of this.convertedMap) {
+            if (entry.status === 'success' && !entry.cleanTextFile && entry.cleanupStatus !== 'cleaning') {
+                filesToClean.push({ filename: entry.textFile, originalName: name });
+            }
+        }
+
+        if (!filesToClean.length) {
+            this.notify('No files to clean up', 'info');
+            return;
+        }
+
+        // Mark all as cleaning
+        filesToClean.forEach(f => {
+            const entry = this.convertedMap.get(f.originalName);
+            if (entry) entry.cleanupStatus = 'cleaning';
+        });
+        this.renderGroupedFileList();
+
+        try {
+            const res = await fetch('/api/cleanup-batch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ files: filesToClean })
+            });
+            if (!res.ok) throw new Error(`Batch cleanup failed: ${res.statusText}`);
+
+            const data = await res.json();
+            this.pollCleanupProgress(data.jobId, filesToClean);
+        } catch (err) {
+            filesToClean.forEach(f => {
+                const entry = this.convertedMap.get(f.originalName);
+                if (entry) entry.cleanupStatus = null;
+            });
+            this.renderGroupedFileList();
+            this.notify(err.message, 'error');
+        }
+    }
+
+    async pollCleanupProgress(jobId, files) {
+        try {
+            const res = await fetch(`/api/status/${jobId}`);
+            if (!res.ok) throw new Error('Status check failed');
+            const status = await res.json();
+
+            if (status.status === 'completed') {
+                // Fetch results and update convertedMap
+                const resultsRes = await fetch(`/api/results/${jobId}`);
+                if (resultsRes.ok) {
+                    const results = await resultsRes.json();
+                    let totalCleanupCost = 0;
+                    results.forEach(r => {
+                        if (r.status === 'success') {
+                            const entry = this.convertedMap.get(r.originalName);
+                            if (entry) {
+                                entry.cleanTextFile = r.cleanTextFile;
+                                entry.cleanupStatus = null;
+                                entry.cost = (entry.cost || 0) + (r.cost || 0);
+                                totalCleanupCost += r.cost || 0;
+                            }
+                        } else {
+                            const entry = this.convertedMap.get(r.originalName);
+                            if (entry) entry.cleanupStatus = null;
+                        }
+                    });
+                    this.usageTracker.data.cost += totalCleanupCost;
+                    this.usageTracker._save();
+                    this.updateStats();
+                }
+                this.renderGroupedFileList();
+                this.updateResultsBar();
+            } else if (status.status === 'failed') {
+                files.forEach(f => {
+                    const entry = this.convertedMap.get(f.originalName);
+                    if (entry) entry.cleanupStatus = null;
+                });
+                this.renderGroupedFileList();
+                this.notify('Batch cleanup failed', 'error');
+            } else {
+                setTimeout(() => this.pollCleanupProgress(jobId, files), 1000);
+            }
+        } catch (err) {
+            files.forEach(f => {
+                const entry = this.convertedMap.get(f.originalName);
+                if (entry) entry.cleanupStatus = null;
+            });
+            this.renderGroupedFileList();
+            this.notify(err.message, 'error');
+        }
+    }
+
+    updateBatchButtons() {
+        const anyUnconverted = ['text', 'ocr', 'vision'].some(g =>
+            this.classifiedFiles[g].length > 0 && this.groupStatus[g] !== 'done'
+        );
+        const anyConverted = [...this.convertedMap.values()].some(r => r.status === 'success');
+        const anyUncleaned = [...this.convertedMap.values()].some(r =>
+            r.status === 'success' && !r.cleanTextFile && r.cleanupStatus !== 'cleaning'
+        );
+
+        if (this.convertAllBtn) this.convertAllBtn.disabled = !anyUnconverted;
+        if (this.cleanupAllBtn) this.cleanupAllBtn.disabled = !anyUncleaned;
+        if (this.downloadAllBtn) this.downloadAllBtn.disabled = !anyConverted;
     }
 
     // ── Config (dynamic model/pricing from server) ──
@@ -451,6 +892,7 @@ class PDFConverter {
             const cfg = await res.json();
             this.availableModels = cfg.models || [];
             this.selectedModel = cfg.defaultModel || this.availableModels[0]?.id;
+            this.cleanupAvailable = cfg.cleanupAvailable || false;
 
             const select = document.getElementById('modelSelect');
             if (select && this.availableModels.length) {
@@ -464,15 +906,9 @@ class PDFConverter {
                 select.value = this.selectedModel;
                 select.addEventListener('change', () => {
                     this.selectedModel = select.value;
-                    this.updateModelInfo();
                 });
-                this.updateModelInfo();
             }
         } catch (e) { /* use default */ }
-    }
-
-    updateModelInfo() {
-        // model info is shown inline in the dropdown — no separate display needed
     }
 
     // ── UI Helpers ──
@@ -517,22 +953,7 @@ class PDFConverter {
     }
 
     resetApp() {
-        this.files = [];
-        this.currentJobId = null;
-        this.conversionResults = [];
-        this.convertedMap.clear();
-        this.fileInput.value = '';
-        this.statusMessages.innerHTML = '';
-        this.progressFill.style.width = '0%';
-        this.progressText.textContent = '0%';
-        this.fileArea.style.display = 'none';
-        this.actionBar.style.display = 'none';
-        this.progressArea.style.display = 'none';
-        this.resultsBar.style.display = 'none';
-        this.errorArea.style.display = 'none';
-        this.hidePreview();
-        this.showLoading(false);
-        this.showLandingView();
+        this.clearFiles();
     }
 }
 
