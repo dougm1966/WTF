@@ -1,11 +1,17 @@
 // Enhanced PDF Processing — PDF Text Extraction with OCR and Vision
 const fs = require('fs-extra');
 const path = require('path');
-const pdfParse = require('pdf-parse');
 const Tesseract = require('tesseract.js');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
+
+// MuPDF is ESM-only — lazy-load via dynamic import
+let _mupdf = null;
+async function getMupdf() {
+    if (!_mupdf) _mupdf = await import('mupdf');
+    return _mupdf;
+}
 
 const CLEANUP_SYSTEM_PROMPT = `You are a text formatting assistant. Clean up raw text extracted from a PDF for use in a RAG (Retrieval-Augmented Generation) knowledge base.
 
@@ -382,21 +388,26 @@ class EnhancedPDFProcessor {
     // ─── Pre-Classification ───
 
     async classifyPDF(filePath) {
-        // Fast classification using only pdf-parse (~50ms per file).
-        // If pdf-parse extracts good text → "text" (free).
+        // Fast classification using MuPDF on page 1 only.
+        // If MuPDF extracts good text → "text" (free).
         // Otherwise → "vision" (the extraction pipeline still tries OCR as fallback before vision).
-        // This avoids slow Ghostscript + Tesseract probes during classification.
         try {
+            const mupdf = await getMupdf();
             const dataBuffer = await fs.readFile(filePath);
-            const data = await pdfParse(dataBuffer);
-            const pageCount = data.numpages || 1;
-            if (this.isExtractionSuccessful(data)) {
+            const doc = mupdf.Document.openDocument(dataBuffer, 'application/pdf');
+            const pageCount = doc.countPages();
+
+            // Extract text from first page only for speed
+            const page = doc.loadPage(0);
+            const text = page.toStructuredText('preserve-whitespace').asText();
+            page.destroy();
+            doc.destroy();
+
+            if (this.isExtractionSuccessful({ text })) {
                 return { classification: 'text', pageCount, confidence: 'high' };
             }
-            // Has pages but text extraction was poor — needs AI
             return { classification: 'vision', pageCount, confidence: 'medium' };
         } catch (e) {
-            // pdf-parse completely failed — likely a scanned/image PDF
             return { classification: 'vision', pageCount: 1, confidence: 'low' };
         }
     }
@@ -528,22 +539,72 @@ class EnhancedPDFProcessor {
 
     async extractTextFromPDF(filePath) {
         try {
+            const mupdf = await getMupdf();
             const dataBuffer = await fs.readFile(filePath);
-            const data = await pdfParse(dataBuffer, {
-                normalizeWhitespace: false,
-                disableCombineTextItems: false
-            });
+            const doc = mupdf.Document.openDocument(dataBuffer, 'application/pdf');
+
+            const pageCount = doc.countPages();
+            let fullText = '';
+
+            for (let i = 0; i < pageCount; i++) {
+                const page = doc.loadPage(i);
+                const stext = page.toStructuredText('preserve-whitespace');
+                const pageText = stext.asText();
+                fullText += `--- PAGE ${i + 1} ---\n${pageText}\n\n`;
+                page.destroy();
+            }
+
+            // Extract form field values if present
+            let formFields = [];
+            try {
+                const pdfDoc = doc.asPDF ? doc.asPDF() : null;
+                if (pdfDoc) {
+                    for (let i = 0; i < pageCount; i++) {
+                        const page = pdfDoc.loadPage(i);
+                        if (page.getWidgets) {
+                            const widgets = page.getWidgets();
+                            for (const w of widgets) {
+                                const name = w.getName ? w.getName() : '';
+                                const value = w.getValue ? w.getValue() : '';
+                                if (name && value) {
+                                    formFields.push({ page: i + 1, name, value });
+                                }
+                            }
+                        }
+                        page.destroy();
+                    }
+                }
+            } catch (formErr) {
+                this.logger.info(`[MuPDF] Form field extraction skipped: ${formErr.message}`);
+            }
+
+            if (formFields.length > 0) {
+                fullText += '\n--- FORM FIELDS ---\n';
+                for (const f of formFields) {
+                    fullText += `${f.name}: ${f.value}\n`;
+                }
+            }
+
+            // Gather metadata
+            const info = {};
+            for (const key of ['Title', 'Author', 'Subject', 'Creator', 'Producer']) {
+                const val = doc.getMetaData(`info:${key}`);
+                if (val) info[key.toLowerCase()] = val;
+            }
+
+            doc.destroy();
+
             return {
-                text: data.text,
-                numpages: data.numpages,
-                info: data.info,
-                metadata: data.metadata,
-                version: data.version
+                text: fullText,
+                numpages: pageCount,
+                info,
+                metadata: null,
+                version: doc.getMetaData ? null : null
             };
         } catch (error) {
-            if (error.message.includes('password')) throw new Error('PDF is password protected');
-            if (error.message.includes('corrupted') || error.message.includes('damaged')) throw new Error('PDF file appears to be corrupted');
-            if (error.message.includes('encrypted')) throw new Error('PDF is encrypted and cannot be processed');
+            if (error.message && error.message.includes('password')) throw new Error('PDF is password protected');
+            if (error.message && (error.message.includes('corrupted') || error.message.includes('damaged'))) throw new Error('PDF file appears to be corrupted');
+            if (error.message && error.message.includes('encrypted')) throw new Error('PDF is encrypted and cannot be processed');
             throw new Error(`PDF parsing failed: ${error.message}`);
         }
     }

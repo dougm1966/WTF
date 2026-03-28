@@ -913,10 +913,8 @@ class PDFConverter {
             this.renderGroupedFileList();
             this.updateResultsBar();
 
-            // If this file is currently previewed, refresh preview
-            if (this.activePreview === originalName) {
-                this.previewFile(entry.textFile, originalName, entry.cleanTextFile);
-            }
+            // Always auto-preview the cleaned result
+            this.previewFile(entry.textFile, originalName, entry.cleanTextFile);
         } catch (err) {
             entry.cleanupStatus = null;
             this.renderGroupedFileList();
@@ -1020,6 +1018,15 @@ class PDFConverter {
                     this.usageTracker.data.cost += totalCleanupCost;
                     this.usageTracker.save();
                     this.updateStats();
+
+                    // Auto-preview the first successfully cleaned file
+                    const firstCleaned = results.find(r => r.status === 'success');
+                    if (firstCleaned) {
+                        const entry = this.convertedMap.get(firstCleaned.originalName);
+                        if (entry) {
+                            this.previewFile(entry.textFile, firstCleaned.originalName, entry.cleanTextFile);
+                        }
+                    }
                 }
                 this.renderGroupedFileList();
                 this.updateResultsBar();
