@@ -83,7 +83,18 @@ app.use(helmet({
 app.use(compression());
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public'));
+app.use(express.static('public', {
+    etag: false,
+    lastModified: false,
+    setHeaders: (res, filePath) => {
+        // No caching for HTML/JS/CSS — forces fresh fetch every time
+        if (filePath.endsWith('.html') || filePath.endsWith('.js') || filePath.endsWith('.css')) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
+        }
+    }
+}));
 
 // Ensure required directories exist
 const ensureDirectories = async () => {
