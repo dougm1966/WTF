@@ -118,9 +118,9 @@ class EnhancedPDFProcessor {
 
     // ─── Vision API (direct fetch, no SDK wrapper) ───
 
-    async callVisionAPI(base64Image, pageNum) {
+    async callVisionAPI(base64Image, pageNum, modelOverride) {
         const body = {
-            model: this.visionModel,
+            model: modelOverride || this.visionModel,
             messages: [{
                 role: 'user',
                 content: [
@@ -245,7 +245,7 @@ class EnhancedPDFProcessor {
 
     // ─── Main Processing Pipeline ───
 
-    async processPDF(filePath, originalName) {
+    async processPDF(filePath, originalName, options = {}) {
         const result = {
             originalName,
             status: 'processing',
@@ -294,7 +294,7 @@ class EnhancedPDFProcessor {
                         // Method 3: Vision API
                         if (this.useVision && this.visionApiKey) {
                             try {
-                                extractionResult = await this.extractTextWithVision(filePath);
+                                extractionResult = await this.extractTextWithVision(filePath, options.model);
                                 result.extractionMethod = 'vision';
                                 if (extractionResult.usage) {
                                     result.usage = extractionResult.usage;
@@ -313,7 +313,7 @@ class EnhancedPDFProcessor {
                 } else if (this.useVision && this.visionApiKey) {
                     // Skip OCR, go straight to Vision
                     try {
-                        extractionResult = await this.extractTextWithVision(filePath);
+                        extractionResult = await this.extractTextWithVision(filePath, options.model);
                         result.extractionMethod = 'vision';
                         if (extractionResult.usage) {
                             result.usage = extractionResult.usage;
@@ -416,12 +416,13 @@ class EnhancedPDFProcessor {
         return { text: fullText, numpages: pageCount, method: 'ocr' };
     }
 
-    async extractTextWithVision(filePath) {
+    async extractTextWithVision(filePath, modelOverride) {
         if (!this.visionApiKey) {
             throw new Error('Vision API not configured');
         }
 
-        this.logger.info(`[Vision] Starting Vision extraction (max ${this.maxVisionPages} pages, model: ${this.visionModel})`);
+        const effectiveModel = modelOverride || this.visionModel;
+        this.logger.info(`[Vision] Starting Vision extraction (max ${this.maxVisionPages} pages, model: ${effectiveModel})`);
 
         const images = await this.convertPdfToImages(filePath, {
             density: 150,
@@ -443,7 +444,7 @@ class EnhancedPDFProcessor {
                 const base64Image = buffer.toString('base64');
                 this.logger.info(`[Vision] Sending page ${page}/${images.length} (${Math.round(base64Image.length / 1024)}KB)`);
 
-                const result = await this.callVisionAPI(base64Image, page);
+                const result = await this.callVisionAPI(base64Image, page, modelOverride);
 
                 totalPromptTokens += result.promptTokens;
                 totalCompletionTokens += result.completionTokens;

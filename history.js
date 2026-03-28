@@ -41,7 +41,7 @@ class HistoryStore {
             fileSize: entry.fileSize || 0,
             pageCount: entry.pageCount || 1,
             extractionMethod: entry.extractionMethod || 'unknown',
-            estimatedCost: entry.estimatedCost || 0,
+            cost: entry.cost || 0,
             status: entry.status || 'success'
         };
         this.data.entries.unshift(record); // newest first

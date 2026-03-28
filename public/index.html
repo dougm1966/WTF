@@ -133,9 +133,13 @@
 
         <!-- ── Footer ── -->
         <footer class="bottombar">
-            <span class="model-info" id="modelInfo">
-                Gemini Flash 2.0 &middot; $0.10/1M in &middot; $0.40/1M out &middot; via OpenRouter
-            </span>
+            <div class="model-selector">
+                <label for="modelSelect" class="model-selector-label">
+                    <i class="fas fa-robot"></i> Model:
+                </label>
+                <select id="modelSelect" class="model-select"></select>
+            </div>
+            <span class="model-info" id="modelInfo"></span>
         </footer>
     </div>
 

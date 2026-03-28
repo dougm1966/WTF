@@ -2,10 +2,6 @@
 class UsageTracker {
     constructor() {
         this.STORAGE_KEY = 'pdf2txt_usage';
-        this.PRICING = {
-            inputPerMillion: 0.10,
-            outputPerMillion: 0.40
-        };
         this.data = this.load();
     }
 
@@ -31,14 +27,12 @@ class UsageTracker {
 
         for (const r of ok) {
             totalPages += r.pageCount || 1;
-            // Only vision uses the API — use actual token counts
             if (r.extractionMethod === 'vision' && r.usage) {
-                const inp = r.usage.promptTokens || 0;
-                const out = r.usage.completionTokens || 0;
-                totalInputTokens += inp;
-                totalOutputTokens += out;
-                totalCost += (inp * this.PRICING.inputPerMillion + out * this.PRICING.outputPerMillion) / 1e6;
+                totalInputTokens += r.usage.promptTokens || 0;
+                totalOutputTokens += r.usage.completionTokens || 0;
             }
+            // Use server-calculated per-file cost (dynamic pricing)
+            totalCost += r.cost || 0;
         }
 
         this.data.files += ok.length;
@@ -77,8 +71,10 @@ class PDFConverter {
         this.files = [];
         this.currentJobId = null;
         this.conversionResults = [];
-        this.convertedMap = new Map(); // originalName → { textFile, status }
+        this.convertedMap = new Map(); // originalName → { textFile, status, cost }
         this.activePreview = null;
+        this.availableModels = [];
+        this.selectedModel = 'google/gemini-flash-2.0';
         this.usageTracker = new UsageTracker();
         this.initElements();
         this.attachEvents();
@@ -226,7 +222,7 @@ class PDFConverter {
                     <i class="fas ${icon}"></i>
                     <div>
                         <div class="file-name">${f.name}</div>
-                        <div class="file-size">${this.fmtSize(f.size)}</div>
+                        <div class="file-size">${this.fmtSize(f.size)}${converted ? ` · <span class="file-cost">${this.fmtCost(converted.cost)}</span>` : ''}</div>
                     </div>
                 </div>
                 ${converted && converted.status === 'success' ? `<a class="file-dl-btn" href="/api/download/${converted.textFile}" download title="Download text"><i class="fas fa-download"></i></a>` : ''}
@@ -283,6 +279,10 @@ class PDFConverter {
         return (b / Math.pow(1024, i)).toFixed(1) + ' ' + u[i];
     }
 
+    fmtCost(cost) {
+        return (!cost || cost === 0) ? 'Free' : '$' + cost.toFixed(4);
+    }
+
     // ── Conversion Flow ──
     async startConversion() {
         if (!this.files.length) { this.notify('Add files first', 'error'); return; }
@@ -300,6 +300,7 @@ class PDFConverter {
         try {
             const fd = new FormData();
             this.files.forEach(f => fd.append('pdfs', f));
+            fd.append('model', this.selectedModel);
 
             const res = await fetch('/api/upload', { method: 'POST', body: fd });
             if (!res.ok) throw new Error(`Upload failed: ${res.statusText}`);
@@ -372,7 +373,8 @@ class PDFConverter {
         this.conversionResults.forEach(r => {
             this.convertedMap.set(r.originalName, {
                 status: r.status,
-                textFile: r.textFile || null
+                textFile: r.textFile || null,
+                cost: r.cost || 0
             });
         });
 
@@ -447,12 +449,34 @@ class PDFConverter {
             const res = await fetch('/api/config');
             if (!res.ok) return;
             const cfg = await res.json();
-            const el = document.getElementById('modelInfo');
-            if (el && cfg.model) {
-                const m = cfg.model.split('/').pop().replace(/-/g, ' ');
-                el.textContent = `${m} \u00b7 $${cfg.pricing.inputPerMillion}/1M in \u00b7 $${cfg.pricing.outputPerMillion}/1M out \u00b7 via OpenRouter`;
+            this.availableModels = cfg.models || [];
+            this.selectedModel = cfg.defaultModel || this.availableModels[0]?.id;
+
+            const select = document.getElementById('modelSelect');
+            if (select && this.availableModels.length) {
+                select.innerHTML = '';
+                this.availableModels.forEach(m => {
+                    const opt = document.createElement('option');
+                    opt.value = m.id;
+                    opt.textContent = `${m.name}  —  $${m.inputPerMillion}/1M in · $${m.outputPerMillion}/1M out`;
+                    select.appendChild(opt);
+                });
+                select.value = this.selectedModel;
+                select.addEventListener('change', () => {
+                    this.selectedModel = select.value;
+                    this.updateModelInfo();
+                });
+                this.updateModelInfo();
             }
-        } catch (e) { /* use default footer text */ }
+        } catch (e) { /* use default */ }
+    }
+
+    updateModelInfo() {
+        const model = this.availableModels.find(m => m.id === this.selectedModel);
+        const el = document.getElementById('modelInfo');
+        if (el && model) {
+            el.textContent = `via OpenRouter`;
+        }
     }
 
     // ── UI Helpers ──

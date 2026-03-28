@@ -18,6 +18,19 @@ const mime = require('mime-types');
 const EnhancedPDFProcessor = require('./pdf-processor-enhanced');
 const HistoryStore = require('./history');
 
+// Available vision models (ordered cheapest to most expensive)
+const AVAILABLE_MODELS = [
+    { id: 'google/gemini-flash-2.0',                   name: 'Gemini Flash 2.0', inputPerMillion: 0.10,  outputPerMillion: 0.40  },
+    { id: 'meta-llama/llama-4-scout-17b-16e-instruct', name: 'Llama 4 Scout',    inputPerMillion: 0.11,  outputPerMillion: 0.18  },
+    { id: 'google/gemini-2.5-pro-preview',              name: 'Gemini Pro 2.5',   inputPerMillion: 1.25,  outputPerMillion: 10.00 },
+    { id: 'openai/gpt-4o',                              name: 'GPT-4o',           inputPerMillion: 2.50,  outputPerMillion: 10.00 },
+    { id: 'anthropic/claude-sonnet-4',                   name: 'Claude Sonnet 4',  inputPerMillion: 3.00,  outputPerMillion: 15.00 },
+];
+
+function getModelPricing(modelId) {
+    return AVAILABLE_MODELS.find(m => m.id === modelId) || AVAILABLE_MODELS[0];
+}
+
 // Initialize Express app
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -168,6 +181,9 @@ app.post('/api/upload', upload.array('pdfs'), async (req, res) => {
             return res.status(400).json({ error: 'No files uploaded' });
         }
 
+        const selectedModel = req.body.model || AVAILABLE_MODELS[0].id;
+        const modelConfig = getModelPricing(selectedModel);
+
         const jobId = uuidv4();
         const job = {
             id: jobId,
@@ -177,6 +193,8 @@ app.post('/api/upload', upload.array('pdfs'), async (req, res) => {
                 path: file.path,
                 size: file.size
             })),
+            model: selectedModel,
+            modelPricing: modelConfig,
             status: 'queued',
             progress: 0,
             completed: 0,
@@ -344,14 +362,11 @@ app.get('/api/history/export', async (req, res) => {
     }
 });
 
-// Get server config (model + pricing for frontend)
+// Get server config (available models + pricing for frontend)
 app.get('/api/config', (req, res) => {
     res.json({
-        model: process.env.OPENROUTER_MODEL || 'google/gemini-flash-2.0',
-        pricing: {
-            inputPerMillion: 0.10,
-            outputPerMillion: 0.40
-        }
+        models: AVAILABLE_MODELS,
+        defaultModel: AVAILABLE_MODELS[0].id
     });
 });
 
@@ -375,19 +390,21 @@ async function processJob(jobId) {
                     type: 'processing' 
                 });
 
-                // Process the PDF file
-                const result = await pdfProcessor.processPDF(file.path, file.originalName);
-                
+                // Process the PDF file with selected model
+                const result = await pdfProcessor.processPDF(file.path, file.originalName, { model: job.model });
+
                 job.results.push(result);
-                
+
                 if (result.status === 'success') {
                     job.completed++;
                     // Save to persistent history — only vision has real API costs
                     const pageCount = result.pageCount || 1;
                     const usage = result.usage || { promptTokens: 0, completionTokens: 0 };
+                    const pricing = job.modelPricing;
                     const actualCost = result.extractionMethod === 'vision'
-                        ? (usage.promptTokens * 0.10 + usage.completionTokens * 0.40) / 1_000_000
+                        ? (usage.promptTokens * pricing.inputPerMillion + usage.completionTokens * pricing.outputPerMillion) / 1_000_000
                         : 0;
+                    result.cost = actualCost;
                     history.add({
                         originalFilename: file.originalName,
                         textFilename: result.textFile,
@@ -422,7 +439,8 @@ async function processJob(jobId) {
                 job.results.push({
                     originalName: file.originalName,
                     status: 'error',
-                    error: error.message
+                    error: error.message,
+                    cost: 0
                 });
                 
                 job.messages.push({ 
