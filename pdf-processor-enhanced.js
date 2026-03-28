@@ -382,41 +382,23 @@ class EnhancedPDFProcessor {
     // ─── Pre-Classification ───
 
     async classifyPDF(filePath) {
-        let pageCount = 0;
-
-        // Step 1: Try pdf-parse (fast, ~50ms)
+        // Fast classification using only pdf-parse (~50ms per file).
+        // If pdf-parse extracts good text → "text" (free).
+        // Otherwise → "vision" (the extraction pipeline still tries OCR as fallback before vision).
+        // This avoids slow Ghostscript + Tesseract probes during classification.
         try {
             const dataBuffer = await fs.readFile(filePath);
             const data = await pdfParse(dataBuffer);
-            pageCount = data.numpages || 1;
+            const pageCount = data.numpages || 1;
             if (this.isExtractionSuccessful(data)) {
                 return { classification: 'text', pageCount, confidence: 'high' };
             }
-        } catch (e) { /* pdf-parse failed, continue */ }
-
-        // Get page count once via Ghostscript if pdf-parse didn't provide it
-        if (!pageCount) {
-            pageCount = await this.getPageCount(filePath);
+            // Has pages but text extraction was poor — needs AI
+            return { classification: 'vision', pageCount, confidence: 'medium' };
+        } catch (e) {
+            // pdf-parse completely failed — likely a scanned/image PDF
+            return { classification: 'vision', pageCount: 1, confidence: 'low' };
         }
-
-        // Step 2: Quick OCR probe — convert page 1 only, run Tesseract
-        if (this.useOCR) {
-            try {
-                const images = await this.convertPdfToImages(filePath, { density: 150, maxPages: 1, knownPageCount: pageCount });
-                if (images.length > 0) {
-                    const { data: { text } } = await Tesseract.recognize(images[0].buffer, 'eng');
-                    const readable = (text.match(/[a-zA-Z0-9\s.,!?;:]/g) || []).length;
-                    if (text.trim().length > 30 && readable / text.length > 0.3) {
-                        return { classification: 'ocr', pageCount, confidence: 'medium' };
-                    }
-                }
-            } catch (e) {
-                this.logger.warn(`[Classify] OCR probe failed: ${e.message}`);
-            }
-        }
-
-        // Step 3: Falls through to vision
-        return { classification: 'vision', pageCount, confidence: 'low' };
     }
 
     // ─── Main Processing Pipeline ───

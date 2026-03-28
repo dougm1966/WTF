@@ -314,9 +314,14 @@ class PDFConverter {
             { key: 'vision', label: 'AI Vision', icon: 'fa-brain', badge: '$ paid', badgeClass: 'paid' }
         ];
 
+        // Check if any group has files (to decide whether to show empty groups as drop targets)
+        const totalFiles = groups.reduce((n, g) => n + this.classifiedFiles[g.key].length, 0);
+        const anyIdle = Object.values(this.groupStatus).some(s => s === 'idle') || Object.keys(this.groupStatus).length === 0;
+
         for (const g of groups) {
             const files = this.classifiedFiles[g.key];
-            if (!files.length) continue;
+            // Show empty groups as drop targets only when there are files elsewhere and groups are idle
+            if (!files.length && !(totalFiles > 0 && anyIdle)) continue;
 
             const status = this.groupStatus[g.key] || 'idle';
             const groupEl = document.createElement('div');
@@ -341,6 +346,14 @@ class PDFConverter {
             // File list body
             const body = document.createElement('div');
             body.className = 'file-group-body';
+
+            if (!files.length) {
+                body.innerHTML = '<div class="drop-hint"><i class="fas fa-arrows-alt"></i> Drag files here</div>';
+                groupEl.appendChild(header);
+                groupEl.appendChild(body);
+                this.fileList.appendChild(groupEl);
+                continue;
+            }
 
             files.forEach(file => {
                 const converted = this.convertedMap.get(file.originalName);
@@ -394,14 +407,16 @@ class PDFConverter {
                     actionsHtml += `<button class="file-action-btn cleanup-btn" disabled><i class="fas fa-sparkles"></i> Cleanup</button>`;
                 }
 
-                // Build move buttons (to the other two groups)
-                const otherGroups = ['text', 'ocr', 'vision'].filter(k => k !== g.key);
-                const moveLabels = { text: 'Text', ocr: 'OCR', vision: 'Vision' };
-                const moveBtnsHtml = !converted && status === 'idle' ? otherGroups.map(og =>
-                    `<button class="file-move-btn" data-from="${g.key}" data-to="${og}" data-file="${file.originalName}">${moveLabels[og]}</button>`
-                ).join('') : '';
+                // Drag handle for unconverted files (to move between groups)
+                const draggable = !converted && status === 'idle';
+                if (draggable) {
+                    el.draggable = true;
+                    el.dataset.group = g.key;
+                    el.dataset.file = file.originalName;
+                }
 
                 el.innerHTML = `
+                    ${draggable ? '<div class="drag-handle" title="Drag to another group"><i class="fas fa-grip-vertical"></i></div>' : ''}
                     <div class="file-info-item">
                         <i class="fas ${icon}" style="${iconStyle}"></i>
                         <div>
@@ -411,7 +426,6 @@ class PDFConverter {
                     </div>
                     <div class="file-actions">
                         ${actionsHtml}
-                        ${moveBtnsHtml ? `<span class="file-move-btns">${moveBtnsHtml}</span>` : ''}
                         ${!converted && status === 'idle' ? `<button class="remove-file" data-group="${g.key}" data-file="${file.originalName}"><i class="fas fa-times"></i></button>` : ''}
                     </div>`;
 
@@ -444,12 +458,40 @@ class PDFConverter {
             btn.addEventListener('click', () => this.startGroupConversion(btn.dataset.group));
         });
 
-        this.fileList.querySelectorAll('.file-move-btn').forEach(btn => {
-            btn.addEventListener('click', () => this.moveFile(btn.dataset.from, btn.dataset.to, btn.dataset.file));
-        });
-
         this.fileList.querySelectorAll('.remove-file').forEach(btn => {
             btn.addEventListener('click', () => this.removeClassifiedFile(btn.dataset.group, btn.dataset.file));
+        });
+
+        // Drag-and-drop between groups
+        this.fileList.querySelectorAll('.file-item[draggable="true"]').forEach(el => {
+            el.addEventListener('dragstart', (e) => {
+                e.dataTransfer.setData('text/plain', JSON.stringify({ group: el.dataset.group, file: el.dataset.file }));
+                el.classList.add('dragging');
+            });
+            el.addEventListener('dragend', () => el.classList.remove('dragging'));
+        });
+
+        this.fileList.querySelectorAll('.file-group').forEach(groupEl => {
+            const targetGroup = groupEl.classList.contains('group-text') ? 'text'
+                : groupEl.classList.contains('group-ocr') ? 'ocr' : 'vision';
+
+            groupEl.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                groupEl.classList.add('drag-over');
+            });
+            groupEl.addEventListener('dragleave', (e) => {
+                if (!groupEl.contains(e.relatedTarget)) groupEl.classList.remove('drag-over');
+            });
+            groupEl.addEventListener('drop', (e) => {
+                e.preventDefault();
+                groupEl.classList.remove('drag-over');
+                try {
+                    const data = JSON.parse(e.dataTransfer.getData('text/plain'));
+                    if (data.group !== targetGroup) {
+                        this.moveFile(data.group, targetGroup, data.file);
+                    }
+                } catch (err) { /* ignore bad drag data */ }
+            });
         });
 
         // Per-file cleanup buttons
