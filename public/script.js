@@ -399,9 +399,9 @@ class PDFConverter {
                     } else if (converted.cleanupStatus === 'cleaning') {
                         actionsHtml += `<button class="file-action-btn cleaning-btn" disabled><i class="fas fa-spinner"></i> Cleaning...</button>`;
                     }
-                    // Download button
+                    // Download button — show text label for cleaned files
                     const dlFile = converted.cleanTextFile || converted.textFile;
-                    actionsHtml += `<a class="file-action-btn dl-btn" href="/api/download/${dlFile}" download title="Download"><i class="fas fa-download"></i></a>`;
+                    actionsHtml += `<a class="file-action-btn dl-btn" href="/api/download/${dlFile}" download title="Download text file"><i class="fas fa-download"></i> Download</a>`;
                 } else if (!converted) {
                     // Disabled cleanup button (teaches feature exists)
                     actionsHtml += `<button class="file-action-btn cleanup-btn" disabled><i class="fas fa-sparkles"></i> Cleanup</button>`;

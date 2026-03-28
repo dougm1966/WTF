@@ -511,12 +511,14 @@ body {
     border-color: #c8dff5;
     color: #4a90d9;
     background: #f0f7ff;
-    padding: 3px 6px;
 }
 .file-action-btn.dl-btn:hover {
     background: #4a90d9;
     color: white;
     border-color: transparent;
+}
+.file-action-btn.dl-btn:active {
+    transform: scale(0.97);
 }
 
 /* ── File State Badges ── */
