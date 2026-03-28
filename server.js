@@ -141,17 +141,18 @@ const upload = multer({
 // Job management
 const jobs = new Map();
 const classifications = new Map();
+const FILE_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours — max time any file stays on disk
 
-// Cleanup interval — remove jobs and classifications older than 1 hour
+// Cleanup interval — remove jobs, classifications, and orphaned files older than TTL
 setInterval(() => {
     const now = Date.now();
     for (const [jobId, job] of jobs.entries()) {
-        if (now - job.createdAt > 3600000) {
+        if (now - job.createdAt > FILE_TTL_MS) {
             cleanupJob(jobId);
         }
     }
     for (const [cid, cls] of classifications.entries()) {
-        if (now - cls.createdAt > 3600000) {
+        if (now - cls.createdAt > FILE_TTL_MS) {
             // Clean up uploaded PDFs that were never converted
             for (const file of cls.files) {
                 if (fs.existsSync(file.path)) {
@@ -161,6 +162,9 @@ setInterval(() => {
             classifications.delete(cid);
         }
     }
+    // Clean expired text files from history and sweep orphans
+    history.cleanupFiles();
+    sweepOrphanedFiles();
 }, 300000); // Run every 5 minutes
 
 // Initialize PDF processor
@@ -551,33 +555,33 @@ app.post('/api/classify', upload.array('pdfs'), async (req, res) => {
         }
 
         const classificationId = uuidv4();
+
+        // Classify files in parallel (batches of 5 to avoid overwhelming Ghostscript)
+        const CLASSIFY_CONCURRENCY = 5;
+        const fileInfos = req.files.map(file => ({
+            originalName: file.originalname,
+            filename: file.filename,
+            path: file.path,
+            size: file.size
+        }));
+
         const fileResults = [];
-
-        for (const file of req.files) {
-            const fileInfo = {
-                originalName: file.originalname,
-                filename: file.filename,
-                path: file.path,
-                size: file.size
-            };
-
-            try {
-                const result = await pdfProcessor.classifyPDF(file.path);
-                fileResults.push({
-                    ...fileInfo,
-                    pageCount: result.pageCount,
-                    classification: result.classification,
-                    confidence: result.confidence
-                });
-            } catch (err) {
-                logger.warn(`Classification failed for ${file.originalname}: ${err.message}`);
-                fileResults.push({
-                    ...fileInfo,
-                    pageCount: 1,
-                    classification: 'vision',
-                    confidence: 'low'
-                });
-            }
+        for (let i = 0; i < fileInfos.length; i += CLASSIFY_CONCURRENCY) {
+            const batch = fileInfos.slice(i, i + CLASSIFY_CONCURRENCY);
+            const results = await Promise.allSettled(
+                batch.map(async (fileInfo) => {
+                    const result = await pdfProcessor.classifyPDF(fileInfo.path);
+                    return { ...fileInfo, pageCount: result.pageCount, classification: result.classification, confidence: result.confidence };
+                })
+            );
+            results.forEach((r, idx) => {
+                if (r.status === 'fulfilled') {
+                    fileResults.push(r.value);
+                } else {
+                    logger.warn(`Classification failed for ${batch[idx].originalName}: ${r.reason?.message}`);
+                    fileResults.push({ ...batch[idx], pageCount: 1, classification: 'vision', confidence: 'low' });
+                }
+            });
         }
 
         classifications.set(classificationId, {
@@ -604,6 +608,15 @@ app.post('/api/classify', upload.array('pdfs'), async (req, res) => {
         logger.error('Classification error:', error);
         res.status(500).json({ error: error.message });
     }
+});
+
+// Check if a classification still exists (for session restore after refresh)
+app.get('/api/classify/:classificationId/check', (req, res) => {
+    const cls = classifications.get(req.params.classificationId);
+    if (!cls) {
+        return res.status(404).json({ exists: false });
+    }
+    res.json({ exists: true, fileCount: cls.files.length, createdAt: cls.createdAt });
 });
 
 // Convert a group of already-classified files
@@ -792,12 +805,20 @@ function cleanupJob(jobId) {
             }
         }
 
-        // Text files are now managed by HistoryStore (30-day retention)
-        // Do NOT delete them here — they persist for the user's document library
+        // Remove converted text files (2-hour TTL for all files on disk)
+        const textsDir = path.join(__dirname, 'uploads', 'texts');
+        for (const result of (job.results || [])) {
+            if (result.textFile) {
+                const textPath = path.join(textsDir, result.textFile);
+                if (fs.existsSync(textPath)) {
+                    fs.unlinkSync(textPath);
+                }
+            }
+        }
 
         // Remove job from memory
         jobs.delete(jobId);
-        
+
         logger.info(`Job ${jobId} cleaned up successfully`);
 
     } catch (error) {
@@ -852,6 +873,31 @@ process.on('SIGINT', () => {
     process.exit(0);
 });
 
+// Safety net: sweep any orphaned files older than TTL from all upload dirs
+function sweepOrphanedFiles() {
+    const dirs = ['uploads/pdfs', 'uploads/texts', 'uploads/temp'];
+    const cutoff = Date.now() - FILE_TTL_MS;
+    for (const dir of dirs) {
+        const fullDir = path.join(__dirname, dir);
+        if (!fs.existsSync(fullDir)) continue;
+        try {
+            const files = fs.readdirSync(fullDir);
+            for (const file of files) {
+                const filePath = path.join(fullDir, file);
+                try {
+                    const stat = fs.statSync(filePath);
+                    if (stat.isFile() && stat.mtimeMs < cutoff) {
+                        fs.unlinkSync(filePath);
+                        logger.info(`Swept orphaned file: ${dir}/${file}`);
+                    }
+                } catch (e) { /* ignore individual file errors */ }
+            }
+        } catch (e) {
+            logger.warn(`Could not sweep directory ${dir}:`, e.message);
+        }
+    }
+}
+
 // Start server
 async function startServer() {
     try {
@@ -870,6 +916,10 @@ async function startServer() {
         setInterval(async () => {
             cachedHealth = await pdfProcessor.checkDependencies();
         }, 300000);
+
+        // Clean up any orphaned files from previous runs
+        sweepOrphanedFiles();
+        history.cleanupFiles();
 
         app.listen(PORT, () => {
             logger.info(`PDF Converter server running on port ${PORT}`);

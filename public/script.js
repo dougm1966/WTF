@@ -65,6 +65,45 @@ class UsageTracker {
     }
 }
 
+// ── Session Persistence (survives page refresh) ──
+class SessionPersistence {
+    constructor() {
+        this.STORAGE_KEY = 'pdf2txt_session';
+        this.MAX_AGE_MS = 110 * 60 * 1000; // 110 minutes (server TTL is 2 hours)
+    }
+
+    save(state) {
+        try {
+            state.savedAt = Date.now();
+            // Convert Map to array of entries for JSON serialization
+            if (state.convertedMap instanceof Map) {
+                state.convertedMap = [...state.convertedMap.entries()];
+            }
+            localStorage.setItem(this.STORAGE_KEY, JSON.stringify(state));
+        } catch (e) { /* ignore quota errors */ }
+    }
+
+    load() {
+        try {
+            const s = localStorage.getItem(this.STORAGE_KEY);
+            if (!s) return null;
+            const data = JSON.parse(s);
+            if (Date.now() - data.savedAt > this.MAX_AGE_MS) {
+                this.clear();
+                return null;
+            }
+            return data;
+        } catch (e) {
+            this.clear();
+            return null;
+        }
+    }
+
+    clear() {
+        localStorage.removeItem(this.STORAGE_KEY);
+    }
+}
+
 // ── Main App ──
 class PDFConverter {
     constructor() {
@@ -76,6 +115,7 @@ class PDFConverter {
         this.availableModels = [];
         this.selectedModel = 'google/gemini-flash-2.0';
         this.usageTracker = new UsageTracker();
+        this.sessionPersistence = new SessionPersistence();
 
         // Classification state
         this.classificationId = null;
@@ -89,6 +129,7 @@ class PDFConverter {
         this.attachEvents();
         this.updateStats();
         this.loadConfig();
+        this.restoreSession(); // async, fire-and-forget — switches to working view if valid session exists
     }
 
     initElements() {
@@ -256,6 +297,7 @@ class PDFConverter {
             }
 
             this.renderGroupedFileList();
+            this.saveSession();
         } catch (err) {
             this.showError(err.message);
         }
@@ -445,6 +487,7 @@ class PDFConverter {
         file.classification = toGroup;
         this.classifiedFiles[toGroup].push(file);
         this.renderGroupedFileList();
+        this.saveSession();
     }
 
     removeClassifiedFile(group, fileName) {
@@ -455,11 +498,13 @@ class PDFConverter {
         // If no files left in any group, go back to landing
         const totalFiles = this.classifiedFiles.text.length + this.classifiedFiles.ocr.length + this.classifiedFiles.vision.length;
         if (totalFiles === 0) {
+            this.sessionPersistence.clear();
             this.showLandingView();
             return;
         }
 
         this.renderGroupedFileList();
+        this.saveSession();
     }
 
     // ── Per-Group Conversion ──
@@ -486,6 +531,7 @@ class PDFConverter {
 
             const data = await res.json();
             this.groupJobs[groupName] = data.jobId;
+            this.saveSession();
             this.pollGroupProgress(groupName);
         } catch (err) {
             this.groupStatus[groupName] = 'idle';
@@ -500,6 +546,14 @@ class PDFConverter {
 
         try {
             const res = await fetch(`/api/status/${jobId}`);
+            if (res.status === 404) {
+                this.groupStatus[groupName] = 'idle';
+                delete this.groupJobs[groupName];
+                this.saveSession();
+                this.renderGroupedFileList();
+                this.notify('Server session expired — please re-upload files', 'error');
+                return;
+            }
             if (!res.ok) throw new Error('Status check failed');
             const status = await res.json();
 
@@ -549,6 +603,7 @@ class PDFConverter {
 
             this.groupStatus[groupName] = 'done';
             this.renderGroupedFileList();
+            this.saveSession();
 
             // Show results bar
             this.updateResultsBar();
@@ -619,6 +674,82 @@ class PDFConverter {
         this.errorArea.style.display = 'none';
         this.hidePreview();
         this.showLandingView();
+        this.sessionPersistence.clear();
+    }
+
+    // ── Session Persistence ──
+    saveSession() {
+        if (!this.classificationId) return;
+        this.sessionPersistence.save({
+            classificationId: this.classificationId,
+            classifiedFiles: this.classifiedFiles,
+            serverFileMap: this.serverFileMap,
+            groupJobs: this.groupJobs,
+            groupStatus: this.groupStatus,
+            convertedMap: this.convertedMap, // SessionPersistence.save() handles Map→entries
+            selectedModel: this.selectedModel,
+            aiCleanup: this.aiCleanupToggle ? this.aiCleanupToggle.checked : false
+        });
+    }
+
+    async restoreSession() {
+        const session = this.sessionPersistence.load();
+        if (!session || !session.classificationId) return;
+
+        // Validate classification still exists on server
+        try {
+            const res = await fetch(`/api/classify/${session.classificationId}/check`);
+            if (!res.ok) {
+                this.sessionPersistence.clear();
+                this.notify('Previous session expired — please re-upload files', 'info');
+                return;
+            }
+        } catch {
+            this.sessionPersistence.clear();
+            return;
+        }
+
+        // Restore state
+        this.classificationId = session.classificationId;
+        this.classifiedFiles = session.classifiedFiles || { text: [], ocr: [], vision: [] };
+        this.serverFileMap = session.serverFileMap || {};
+        this.groupJobs = session.groupJobs || {};
+        this.groupStatus = session.groupStatus || {};
+        this.convertedMap = new Map(session.convertedMap || []);
+        if (session.selectedModel) this.selectedModel = session.selectedModel;
+        if (session.aiCleanup && this.aiCleanupToggle) this.aiCleanupToggle.checked = true;
+
+        // Switch to working view and render
+        this.showWorkingView();
+        this.renderGroupedFileList();
+        this.updateResultsBar();
+
+        // Resume polling for any in-progress conversions
+        for (const [group, status] of Object.entries(this.groupStatus)) {
+            if (status === 'converting' && this.groupJobs[group]) {
+                try {
+                    const statusRes = await fetch(`/api/status/${this.groupJobs[group]}`);
+                    if (statusRes.ok) {
+                        const jobStatus = await statusRes.json();
+                        if (jobStatus.status === 'completed') {
+                            await this.fetchGroupResults(group);
+                        } else if (jobStatus.status === 'failed') {
+                            this.groupStatus[group] = 'idle';
+                            this.notify(`${group} conversion failed while away`, 'error');
+                        } else {
+                            this.pollGroupProgress(group);
+                        }
+                    } else {
+                        this.groupStatus[group] = 'idle';
+                    }
+                } catch {
+                    this.groupStatus[group] = 'idle';
+                }
+            }
+        }
+
+        this.saveSession(); // persist any status corrections
+        this.renderGroupedFileList();
     }
 
     showWorkingView() {
@@ -891,7 +1022,9 @@ class PDFConverter {
             if (!res.ok) return;
             const cfg = await res.json();
             this.availableModels = cfg.models || [];
-            this.selectedModel = cfg.defaultModel || this.availableModels[0]?.id;
+            const defaultModel = cfg.defaultModel || this.availableModels[0]?.id;
+            // Only set default if no session-restored model
+            if (!this.classificationId) this.selectedModel = defaultModel;
             this.cleanupAvailable = cfg.cleanupAvailable || false;
 
             const select = document.getElementById('modelSelect');

@@ -60,21 +60,26 @@ class EnhancedPDFProcessor {
 
     // ─── PDF-to-Image Conversion (direct Ghostscript, no wrappers) ───
 
-    async convertPdfToImages(filePath, { density = 150, maxPages = null } = {}) {
+    async convertPdfToImages(filePath, { density = 150, maxPages = null, knownPageCount = null } = {}) {
         const prefix = path.join(this.tempDir, `gs_${Date.now()}_`);
         const createdFiles = [];
 
         try {
-            // Determine page count first
-            const { stdout } = await execFileAsync('gs', [
-                '-q', '-dNODISPLAY', '-dNOSAFER',
-                '-c', `(${filePath.replace(/\\/g, '/').replace(/([()])/g, '\\$1')}) (r) file runpdfbegin pdfpagecount = quit`
-            ]);
-            const parsedPages = parseInt(stdout.trim());
-            if (!parsedPages || parsedPages < 1) {
-                this.logger.warn(`[ImageConvert] Page count command returned "${stdout.trim()}", defaulting to 1`);
+            // Determine page count (skip if already known)
+            let totalPages;
+            if (knownPageCount && knownPageCount > 0) {
+                totalPages = knownPageCount;
+            } else {
+                const { stdout } = await execFileAsync('gs', [
+                    '-q', '-dNODISPLAY', '-dNOSAFER',
+                    '-c', `(${filePath.replace(/\\/g, '/').replace(/([()])/g, '\\$1')}) (r) file runpdfbegin pdfpagecount = quit`
+                ]);
+                const parsedPages = parseInt(stdout.trim());
+                if (!parsedPages || parsedPages < 1) {
+                    this.logger.warn(`[ImageConvert] Page count command returned "${stdout.trim()}", defaulting to 1`);
+                }
+                totalPages = (parsedPages && parsedPages > 0) ? parsedPages : 1;
             }
-            const totalPages = (parsedPages && parsedPages > 0) ? parsedPages : 1;
             const pagesToConvert = maxPages ? Math.min(totalPages, maxPages) : totalPages;
 
             this.logger.info(`[ImageConvert] Converting ${pagesToConvert}/${totalPages} pages at ${density} DPI`);
@@ -377,7 +382,7 @@ class EnhancedPDFProcessor {
     // ─── Pre-Classification ───
 
     async classifyPDF(filePath) {
-        let pageCount = 1;
+        let pageCount = 0;
 
         // Step 1: Try pdf-parse (fast, ~50ms)
         try {
@@ -387,21 +392,21 @@ class EnhancedPDFProcessor {
             if (this.isExtractionSuccessful(data)) {
                 return { classification: 'text', pageCount, confidence: 'high' };
             }
-        } catch (e) {
-            // pdf-parse failed — try to get page count via Ghostscript
+        } catch (e) { /* pdf-parse failed, continue */ }
+
+        // Get page count once via Ghostscript if pdf-parse didn't provide it
+        if (!pageCount) {
             pageCount = await this.getPageCount(filePath);
         }
 
         // Step 2: Quick OCR probe — convert page 1 only, run Tesseract
         if (this.useOCR) {
             try {
-                const images = await this.convertPdfToImages(filePath, { density: 150, maxPages: 1 });
+                const images = await this.convertPdfToImages(filePath, { density: 150, maxPages: 1, knownPageCount: pageCount });
                 if (images.length > 0) {
                     const { data: { text } } = await Tesseract.recognize(images[0].buffer, 'eng');
                     const readable = (text.match(/[a-zA-Z0-9\s.,!?;:]/g) || []).length;
                     if (text.trim().length > 30 && readable / text.length > 0.3) {
-                        // Get full page count if we don't have it yet
-                        if (pageCount === 1) pageCount = await this.getPageCount(filePath);
                         return { classification: 'ocr', pageCount, confidence: 'medium' };
                     }
                 }
@@ -411,7 +416,6 @@ class EnhancedPDFProcessor {
         }
 
         // Step 3: Falls through to vision
-        if (pageCount === 1) pageCount = await this.getPageCount(filePath);
         return { classification: 'vision', pageCount, confidence: 'low' };
     }
 

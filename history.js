@@ -5,6 +5,7 @@ const { v4: uuidv4 } = require('uuid');
 
 const HISTORY_FILE = path.join(__dirname, 'data', 'history.json');
 const RETENTION_DAYS = 30;
+const FILE_RETENTION_MS = 2 * 60 * 60 * 1000; // 2 hours — text files deleted after this
 
 class HistoryStore {
     constructor() {
@@ -102,6 +103,32 @@ class HistoryStore {
         this.data.entries = this.data.entries.filter(e => e.timestamp >= cutoff);
         this._save();
         console.log(`History cleanup: removed ${expired.length} expired entries`);
+    }
+
+    // Delete text files older than 2 hours but keep history metadata
+    cleanupFiles() {
+        const cutoff = Date.now() - FILE_RETENTION_MS;
+        const textsDir = path.join(__dirname, 'uploads', 'texts');
+        let cleaned = 0;
+
+        for (const entry of this.data.entries) {
+            if (entry.fileExpired || !entry.textFilename) continue;
+            if (entry.timestamp >= cutoff) continue;
+
+            const filePath = path.join(textsDir, entry.textFilename);
+            if (fs.existsSync(filePath)) {
+                try {
+                    fs.unlinkSync(filePath);
+                    cleaned++;
+                } catch (e) { /* ignore */ }
+            }
+            entry.fileExpired = true;
+        }
+
+        if (cleaned > 0) {
+            this._save();
+            console.log(`File cleanup: removed ${cleaned} text files older than 2 hours`);
+        }
     }
 
     getTextFiles(textsDir) {
