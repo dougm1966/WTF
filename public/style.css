@@ -267,12 +267,7 @@ body {
     box-shadow: 0 10px 30px rgba(0,0,0,0.2);
 }
 
-/* ── Action Bar ── */
-.action-bar {
-    display: flex;
-    gap: 8px;
-    flex-shrink: 0;
-}
+/* ── Action Bar (inside convert-bar) ── */
 
 /* Upload Zone */
 .drop-area {
@@ -346,9 +341,10 @@ body {
 }
 
 .file-item {
-    display: flex;
+    display: grid;
+    grid-template-columns: 1fr auto auto;
     align-items: center;
-    justify-content: space-between;
+    gap: 12px;
     padding: 8px 10px;
     border-radius: 8px;
     margin-bottom: 4px;
@@ -374,7 +370,6 @@ body {
     display: flex;
     align-items: center;
     gap: 8px;
-    flex: 1;
     min-width: 0;
 }
 
@@ -395,6 +390,18 @@ body {
 .file-size {
     font-size: 0.72rem;
     color: #999;
+}
+
+.file-cost-col {
+    font-size: 0.72rem;
+    color: #999;
+    white-space: nowrap;
+    text-align: right;
+}
+
+.file-cost-col .file-cost {
+    color: #667eea;
+    font-weight: 500;
 }
 
 .remove-file {
@@ -673,58 +680,87 @@ body {
     outline: none;
 }
 
-/* ── Footer ── */
-.bottombar {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-    padding: 6px 0 2px;
+/* ── Convert Bar (bottom of col-left) ── */
+.convert-bar {
+    margin-top: auto;
     flex-shrink: 0;
+    background: linear-gradient(135deg, #f0f2ff 0%, #f5f0ff 100%);
+    border: 1px solid #e0ddf5;
+    border-radius: 10px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
 }
 
-.model-selector {
+.convert-bar-model {
     display: flex;
     align-items: center;
     gap: 6px;
 }
 
-.model-selector-label {
-    font-size: 0.72rem;
-    color: rgba(255,255,255,0.7);
+.convert-bar-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: #667eea;
     white-space: nowrap;
     display: flex;
     align-items: center;
     gap: 4px;
 }
 
-.model-select {
-    background: rgba(255,255,255,0.15);
-    backdrop-filter: blur(10px);
-    border: 1px solid rgba(255,255,255,0.25);
-    border-radius: 6px;
-    color: white;
+.convert-bar-select {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 8px;
+    border: 1px solid #d0cce8;
+    border-radius: 8px;
+    background: white;
+    color: #444;
+    font-family: inherit;
     font-size: 0.72rem;
-    padding: 4px 8px;
+    font-weight: 500;
     cursor: pointer;
     outline: none;
     transition: border-color 0.2s ease;
 }
 
-.model-select:hover,
-.model-select:focus-visible {
-    border-color: rgba(255,255,255,0.5);
+.convert-bar-select:hover,
+.convert-bar-select:focus-visible {
+    border-color: #667eea;
 }
 
-.model-select option {
-    background: #2d1b4e;
-    color: white;
+.convert-bar-actions {
+    display: flex;
+    gap: 8px;
 }
 
-.model-info {
-    font-size: 0.72rem;
-    color: rgba(255,255,255,0.7);
+.convert-bar-actions .btn-fill {
+    flex: 1;
 }
+
+.convert-bar-clear {
+    background: white;
+    border: 1px solid #d0cce8;
+    color: #999;
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 0.75rem;
+    padding: 0;
+    transition: all 0.2s ease;
+}
+.convert-bar-clear:hover {
+    border-color: #667eea;
+    color: #667eea;
+    transform: translateY(-1px);
+}
+.convert-bar-clear:active { transform: translateY(0); }
+.convert-bar-clear:focus-visible { outline: 2px solid #667eea; outline-offset: 2px; }
 
 /* ── Per-file cost ── */
 .file-cost {
@@ -778,10 +814,10 @@ body {
         gap: 8px;
     }
     .topbar-stats { flex-wrap: wrap; gap: 4px; }
-    .action-bar { flex-direction: column; }
     .btn-sm { width: 100%; justify-content: center; }
-    .bottombar { flex-direction: column; gap: 4px; }
-    .model-select { width: 100%; }
+    .convert-bar-select { font-size: 0.68rem; }
+    .file-item { grid-template-columns: 1fr auto; }
+    .file-cost-col { display: none; }
 }
 
 @media (max-height: 600px) {

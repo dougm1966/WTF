@@ -63,12 +63,6 @@
         <main class="columns" id="workingView" style="display:none;">
             <!-- LEFT: Upload + File List (always visible) -->
             <div class="col-left">
-                <!-- Action bar — shown when files are queued -->
-                <div class="action-bar" id="actionBar" style="display:none;">
-                    <button class="btn btn-sm btn-fill" id="convertBtn"><i class="fas fa-bolt"></i> Convert</button>
-                    <button class="btn btn-sm btn-ghost" id="clearBtn"><i class="fas fa-trash"></i> Clear</button>
-                </div>
-
                 <!-- Upload zone — always visible -->
                 <div class="drop-area" id="uploadArea">
                     <i class="fas fa-arrow-up-from-bracket drop-icon"></i>
@@ -109,6 +103,18 @@
                     <div class="error-box" id="errorMessage"></div>
                     <button class="btn btn-sm btn-fill" id="retryBtn"><i class="fas fa-redo"></i> Retry</button>
                 </div>
+
+                <!-- Convert bar — pinned to bottom -->
+                <div class="convert-bar" id="convertBar">
+                    <div class="convert-bar-model">
+                        <span class="convert-bar-label"><i class="fas fa-robot"></i> Model</span>
+                        <select id="modelSelect" class="convert-bar-select"></select>
+                    </div>
+                    <div class="convert-bar-actions" id="actionBar" style="display:none;">
+                        <button class="btn btn-sm btn-fill" id="convertBtn"><i class="fas fa-bolt"></i> Convert</button>
+                        <button class="btn btn-sm convert-bar-clear" id="clearBtn" title="Clear files"><i class="fas fa-trash"></i></button>
+                    </div>
+                </div>
             </div>
 
             <!-- RIGHT: Text Preview -->
@@ -131,16 +137,7 @@
             </div>
         </main>
 
-        <!-- ── Footer ── -->
-        <footer class="bottombar">
-            <div class="model-selector">
-                <label for="modelSelect" class="model-selector-label">
-                    <i class="fas fa-robot"></i> Model:
-                </label>
-                <select id="modelSelect" class="model-select"></select>
-            </div>
-            <span class="model-info" id="modelInfo"></span>
-        </footer>
+        <!-- model info removed — selector is now inside col-left -->
     </div>
 
     <!-- Loading Overlay -->

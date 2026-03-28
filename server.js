@@ -126,13 +126,25 @@ const upload = multer({
 
 // Job management
 const jobs = new Map();
+const classifications = new Map();
 
-// Job cleanup interval (remove jobs older than 1 hour)
+// Cleanup interval — remove jobs and classifications older than 1 hour
 setInterval(() => {
     const now = Date.now();
     for (const [jobId, job] of jobs.entries()) {
-        if (now - job.createdAt > 3600000) { // 1 hour
+        if (now - job.createdAt > 3600000) {
             cleanupJob(jobId);
+        }
+    }
+    for (const [cid, cls] of classifications.entries()) {
+        if (now - cls.createdAt > 3600000) {
+            // Clean up uploaded PDFs that were never converted
+            for (const file of cls.files) {
+                if (fs.existsSync(file.path)) {
+                    fs.unlinkSync(file.path);
+                }
+            }
+            classifications.delete(cid);
         }
     }
 }, 300000); // Run every 5 minutes
@@ -147,7 +159,6 @@ const pdfProcessor = new EnhancedPDFProcessor({
     openaiApiKey: process.env.OPENAI_API_KEY,
     useOCR: true,
     useVision: true,
-    maxVisionPages: parseInt(process.env.MAX_VISION_PAGES) || 10,
     logger: logger
 });
 
@@ -370,6 +381,142 @@ app.get('/api/config', (req, res) => {
     });
 });
 
+// ── Classification API ──
+
+// Classify uploaded PDFs into text/ocr/vision groups
+app.post('/api/classify', upload.array('pdfs'), async (req, res) => {
+    try {
+        if (!req.files || req.files.length === 0) {
+            return res.status(400).json({ error: 'No files uploaded' });
+        }
+
+        const classificationId = uuidv4();
+        const fileResults = [];
+
+        for (const file of req.files) {
+            const fileInfo = {
+                originalName: file.originalname,
+                filename: file.filename,
+                path: file.path,
+                size: file.size
+            };
+
+            try {
+                const result = await pdfProcessor.classifyPDF(file.path);
+                fileResults.push({
+                    ...fileInfo,
+                    pageCount: result.pageCount,
+                    classification: result.classification,
+                    confidence: result.confidence
+                });
+            } catch (err) {
+                logger.warn(`Classification failed for ${file.originalname}: ${err.message}`);
+                fileResults.push({
+                    ...fileInfo,
+                    pageCount: 1,
+                    classification: 'vision',
+                    confidence: 'low'
+                });
+            }
+        }
+
+        classifications.set(classificationId, {
+            id: classificationId,
+            files: fileResults,
+            createdAt: Date.now()
+        });
+
+        logger.info(`Classification ${classificationId}: ${fileResults.length} files classified`);
+
+        res.json({
+            classificationId,
+            files: fileResults.map(f => ({
+                originalName: f.originalName,
+                filename: f.filename,
+                size: f.size,
+                pageCount: f.pageCount,
+                classification: f.classification,
+                confidence: f.confidence
+            }))
+        });
+
+    } catch (error) {
+        logger.error('Classification error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Convert a group of already-classified files
+app.post('/api/convert-group', express.json(), async (req, res) => {
+    try {
+        const { classificationId, files, model, forceMethod } = req.body;
+
+        if (!classificationId || !files || !files.length) {
+            return res.status(400).json({ error: 'Missing classificationId or files' });
+        }
+
+        const cls = classifications.get(classificationId);
+        if (!cls) {
+            return res.status(404).json({ error: 'Classification not found or expired' });
+        }
+
+        // Resolve file paths from the classification record
+        const resolvedFiles = [];
+        for (const reqFile of files) {
+            const match = cls.files.find(f => f.filename === reqFile.filename);
+            if (match && fs.existsSync(match.path)) {
+                resolvedFiles.push(match);
+            } else {
+                logger.warn(`File not found for conversion: ${reqFile.filename}`);
+            }
+        }
+
+        if (resolvedFiles.length === 0) {
+            return res.status(400).json({ error: 'No valid files found' });
+        }
+
+        const selectedModel = model || AVAILABLE_MODELS[0].id;
+        const modelConfig = getModelPricing(selectedModel);
+
+        const jobId = uuidv4();
+        const job = {
+            id: jobId,
+            files: resolvedFiles.map(f => ({
+                originalName: f.originalName,
+                filename: f.filename,
+                path: f.path,
+                size: f.size
+            })),
+            model: selectedModel,
+            modelPricing: modelConfig,
+            forceMethod: forceMethod || null,
+            status: 'queued',
+            progress: 0,
+            completed: 0,
+            failed: 0,
+            total: resolvedFiles.length,
+            results: [],
+            createdAt: Date.now(),
+            messages: []
+        };
+
+        jobs.set(jobId, job);
+        processJob(jobId);
+
+        logger.info(`Group conversion job ${jobId}: ${resolvedFiles.length} files, method: ${forceMethod || 'auto'}`);
+
+        res.json({
+            jobId,
+            status: 'queued',
+            files: resolvedFiles.length
+        });
+
+    } catch (error) {
+        logger.error('Convert-group error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Process job function
 async function processJob(jobId) {
     const job = jobs.get(jobId);
@@ -390,8 +537,11 @@ async function processJob(jobId) {
                     type: 'processing' 
                 });
 
-                // Process the PDF file with selected model
-                const result = await pdfProcessor.processPDF(file.path, file.originalName, { model: job.model });
+                // Process the PDF file with selected model and optional forced method
+                const result = await pdfProcessor.processPDF(file.path, file.originalName, {
+                    model: job.model,
+                    forceMethod: job.forceMethod || null
+                });
 
                 job.results.push(result);
 

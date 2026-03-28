@@ -14,7 +14,7 @@ class EnhancedPDFProcessor {
         this.outputDir = options.outputDir || 'uploads/texts';
         this.useOCR = options.useOCR || false;
         this.useVision = options.useVision || false;
-        this.maxVisionPages = options.maxVisionPages || parseInt(process.env.MAX_VISION_PAGES) || 10;
+        this.maxVisionPages = null; // no page cap — process all pages
         this.logger = options.logger || console;
 
         // OpenRouter / OpenAI Vision config (called directly via fetch, no SDK wrapper)
@@ -243,6 +243,62 @@ class EnhancedPDFProcessor {
         return results;
     }
 
+    // ─── Page Count Helper ───
+
+    async getPageCount(filePath) {
+        try {
+            const { stdout } = await execFileAsync('gs', [
+                '-q', '-dNODISPLAY', '-dNOSAFER',
+                '-c', `(${filePath.replace(/\\/g, '/').replace(/([()])/g, '\\$1')}) (r) file runpdfbegin pdfpagecount = quit`
+            ]);
+            const parsed = parseInt(stdout.trim());
+            return (parsed && parsed > 0) ? parsed : 1;
+        } catch (e) {
+            return 1;
+        }
+    }
+
+    // ─── Pre-Classification ───
+
+    async classifyPDF(filePath) {
+        let pageCount = 1;
+
+        // Step 1: Try pdf-parse (fast, ~50ms)
+        try {
+            const dataBuffer = await fs.readFile(filePath);
+            const data = await pdfParse(dataBuffer);
+            pageCount = data.numpages || 1;
+            if (this.isExtractionSuccessful(data)) {
+                return { classification: 'text', pageCount, confidence: 'high' };
+            }
+        } catch (e) {
+            // pdf-parse failed — try to get page count via Ghostscript
+            pageCount = await this.getPageCount(filePath);
+        }
+
+        // Step 2: Quick OCR probe — convert page 1 only, run Tesseract
+        if (this.useOCR) {
+            try {
+                const images = await this.convertPdfToImages(filePath, { density: 150, maxPages: 1 });
+                if (images.length > 0) {
+                    const { data: { text } } = await Tesseract.recognize(images[0].buffer, 'eng');
+                    const readable = (text.match(/[a-zA-Z0-9\s.,!?;:]/g) || []).length;
+                    if (text.trim().length > 30 && readable / text.length > 0.3) {
+                        // Get full page count if we don't have it yet
+                        if (pageCount === 1) pageCount = await this.getPageCount(filePath);
+                        return { classification: 'ocr', pageCount, confidence: 'medium' };
+                    }
+                }
+            } catch (e) {
+                this.logger.warn(`[Classify] OCR probe failed: ${e.message}`);
+            }
+        }
+
+        // Step 3: Falls through to vision
+        if (pageCount === 1) pageCount = await this.getPageCount(filePath);
+        return { classification: 'vision', pageCount, confidence: 'low' };
+    }
+
     // ─── Main Processing Pipeline ───
 
     async processPDF(filePath, originalName, options = {}) {
@@ -267,67 +323,66 @@ class EnhancedPDFProcessor {
             await this.validatePDFFile(filePath);
 
             let extractionResult = null;
+            const forceMethod = options.forceMethod || null;
+
+            // Build method chain based on forceMethod hint
+            // 'text': standard → ocr → vision (default chain)
+            // 'ocr': ocr → vision (skip standard)
+            // 'vision': vision only
+            // null: standard → ocr → vision (default chain)
+            const tryStandard = !forceMethod || forceMethod === 'text';
+            const tryOCR = this.useOCR && (!forceMethod || forceMethod === 'text' || forceMethod === 'ocr');
+            const tryVision = this.useVision && this.visionApiKey;
 
             // Method 1: Standard PDF text extraction
-            try {
-                extractionResult = await this.extractTextFromPDF(filePath);
-                if (this.isExtractionSuccessful(extractionResult)) {
-                    result.extractionMethod = 'standard';
-                    this.logger.info(`[Standard] Success for ${originalName}`);
-                } else {
-                    throw new Error('Standard extraction produced insufficient content');
-                }
-            } catch (error) {
-                errors.standard = error.message;
-                this.logger.info(`[Standard] Failed for ${originalName}: ${error.message}`);
-
-                // Method 2: OCR with Tesseract
-                if (this.useOCR) {
-                    try {
-                        extractionResult = await this.extractTextWithOCR(filePath);
-                        result.extractionMethod = 'ocr';
-                        this.logger.info(`[OCR] Success for ${originalName}`);
-                    } catch (ocrError) {
-                        errors.ocr = ocrError.message;
-                        this.logger.info(`[OCR] Failed for ${originalName}: ${ocrError.message}`);
-
-                        // Method 3: Vision API
-                        if (this.useVision && this.visionApiKey) {
-                            try {
-                                extractionResult = await this.extractTextWithVision(filePath, options.model);
-                                result.extractionMethod = 'vision';
-                                if (extractionResult.usage) {
-                                    result.usage = extractionResult.usage;
-                                }
-                                this.logger.info(`[Vision] Success for ${originalName}`);
-                            } catch (visionError) {
-                                errors.vision = visionError.message;
-                                this.logger.error(`[Vision] Failed for ${originalName}: ${visionError.message}`);
-                                const detail = Object.entries(errors).map(([k, v]) => `${k}: ${v}`).join('; ');
-                                throw new Error(`All extraction methods failed — ${detail}`);
-                            }
-                        } else {
-                            throw new Error('OCR failed and Vision API not configured');
-                        }
+            if (tryStandard) {
+                try {
+                    extractionResult = await this.extractTextFromPDF(filePath);
+                    if (this.isExtractionSuccessful(extractionResult)) {
+                        result.extractionMethod = 'standard';
+                        this.logger.info(`[Standard] Success for ${originalName}`);
+                    } else {
+                        throw new Error('Standard extraction produced insufficient content');
                     }
-                } else if (this.useVision && this.visionApiKey) {
-                    // Skip OCR, go straight to Vision
-                    try {
-                        extractionResult = await this.extractTextWithVision(filePath, options.model);
-                        result.extractionMethod = 'vision';
-                        if (extractionResult.usage) {
-                            result.usage = extractionResult.usage;
-                        }
-                        this.logger.info(`[Vision] Success for ${originalName} (OCR disabled)`);
-                    } catch (visionError) {
-                        errors.vision = visionError.message;
-                        this.logger.error(`[Vision] Failed for ${originalName}: ${visionError.message}`);
-                        const detail = Object.entries(errors).map(([k, v]) => `${k}: ${v}`).join('; ');
-                        throw new Error(`All extraction methods failed — ${detail}`);
-                    }
-                } else {
-                    throw error;
+                } catch (error) {
+                    errors.standard = error.message;
+                    this.logger.info(`[Standard] Failed for ${originalName}: ${error.message}`);
+                    extractionResult = null;
                 }
+            }
+
+            // Method 2: OCR with Tesseract
+            if (!extractionResult && tryOCR) {
+                try {
+                    extractionResult = await this.extractTextWithOCR(filePath);
+                    result.extractionMethod = 'ocr';
+                    this.logger.info(`[OCR] Success for ${originalName}`);
+                } catch (ocrError) {
+                    errors.ocr = ocrError.message;
+                    this.logger.info(`[OCR] Failed for ${originalName}: ${ocrError.message}`);
+                    extractionResult = null;
+                }
+            }
+
+            // Method 3: Vision API
+            if (!extractionResult && tryVision) {
+                try {
+                    extractionResult = await this.extractTextWithVision(filePath, options.model);
+                    result.extractionMethod = 'vision';
+                    if (extractionResult.usage) {
+                        result.usage = extractionResult.usage;
+                    }
+                    this.logger.info(`[Vision] Success for ${originalName}`);
+                } catch (visionError) {
+                    errors.vision = visionError.message;
+                    this.logger.error(`[Vision] Failed for ${originalName}: ${visionError.message}`);
+                    extractionResult = null;
+                }
+            }
+
+            if (!extractionResult) {
+                const detail = Object.entries(errors).map(([k, v]) => `${k}: ${v}`).join('; ');
+                throw new Error(`All extraction methods failed — ${detail}`);
             }
 
             result.quality = this.assessExtractionQuality(extractionResult.text, result.extractionMethod);
@@ -422,11 +477,11 @@ class EnhancedPDFProcessor {
         }
 
         const effectiveModel = modelOverride || this.visionModel;
-        this.logger.info(`[Vision] Starting Vision extraction (max ${this.maxVisionPages} pages, model: ${effectiveModel})`);
+        this.logger.info(`[Vision] Starting Vision extraction (all pages, model: ${effectiveModel})`);
 
         const images = await this.convertPdfToImages(filePath, {
             density: 150,
-            maxPages: this.maxVisionPages
+            maxPages: null
         });
 
         let fullText = '';
@@ -587,8 +642,7 @@ class EnhancedPDFProcessor {
             useOCR: this.useOCR,
             useVision: this.useVision,
             hasVisionAPI: !!this.visionApiKey,
-            visionModel: this.visionModel || null,
-            maxVisionPages: this.maxVisionPages
+            visionModel: this.visionModel || null
         };
     }
 }

@@ -220,10 +220,10 @@ class PDFConverter {
             el.innerHTML = `
                 <div class="file-info-item">
                     <i class="fas ${icon}"></i>
-                    <div>
-                        <div class="file-name">${f.name}</div>
-                        <div class="file-size">${this.fmtSize(f.size)}${converted ? ` · <span class="file-cost">${this.fmtCost(converted.cost)}</span>` : ''}</div>
-                    </div>
+                    <div class="file-name">${f.name}</div>
+                </div>
+                <div class="file-cost-col">
+                    ${this.fmtSize(f.size)}${converted ? ` · <span class="file-cost">${this.fmtCost(converted.cost)}</span>` : ''}
                 </div>
                 ${converted && converted.status === 'success' ? `<a class="file-dl-btn" href="/api/download/${converted.textFile}" download title="Download text"><i class="fas fa-download"></i></a>` : ''}
                 ${!converted ? `<button class="remove-file" data-i="${i}"><i class="fas fa-times"></i></button>` : ''}`;
@@ -472,11 +472,7 @@ class PDFConverter {
     }
 
     updateModelInfo() {
-        const model = this.availableModels.find(m => m.id === this.selectedModel);
-        const el = document.getElementById('modelInfo');
-        if (el && model) {
-            el.textContent = `via OpenRouter`;
-        }
+        // model info is shown inline in the dropdown — no separate display needed
     }
 
     // ── UI Helpers ──
