@@ -651,6 +651,9 @@ class PDFConverter {
                     error: r.error || null,
                     errorDetails: r.errorDetails || null
                 });
+                if (r.status !== 'success') {
+                    this.notify(`Conversion failed: ${r.originalName} — ${r.error || 'unknown error'}`, 'error');
+                }
             });
 
             this.groupStatus[groupName] = 'done';

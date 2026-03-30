@@ -181,7 +181,8 @@ class EnhancedPDFProcessor {
                     }
                 ]
             }],
-            max_tokens: 4000
+            max_tokens: 4000,
+            include_reasoning: false
         };
 
         this.logger.info(`[Vision] API call: model=${effectiveModel}, page=${pageNum}, imageSize=${Math.round(base64Image.length / 1024)}KB`);
@@ -217,8 +218,11 @@ class EnhancedPDFProcessor {
                 }
 
                 const data = await response.json();
+                const msg = data.choices?.[0]?.message;
+                const text = msg?.content || msg?.reasoning || '';
+                this.logger.info(`[Vision] Page ${pageNum} response: ${text.length} chars, finish=${data.choices?.[0]?.finish_reason}`);
                 return {
-                    text: data.choices?.[0]?.message?.content || '',
+                    text,
                     promptTokens: data.usage?.prompt_tokens || 0,
                     completionTokens: data.usage?.completion_tokens || 0
                 };
@@ -695,6 +699,10 @@ class EnhancedPDFProcessor {
             density: 150,
             maxPages: null
         });
+
+        if (images.length === 0) {
+            throw new Error('PDF to image conversion produced no pages — Ghostscript may have failed or PDF is empty');
+        }
 
         let fullText = '';
         let pageCount = 0;
