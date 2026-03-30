@@ -18,13 +18,12 @@ const mime = require('mime-types');
 const EnhancedPDFProcessor = require('./pdf-processor-enhanced');
 const HistoryStore = require('./history');
 
-// Available vision models (ordered cheapest to most expensive)
+// Available vision models (ranked by document extraction quality — OmniDocBench benchmarks)
 const AVAILABLE_MODELS = [
-    { id: 'google/gemini-flash-2.0',                   name: 'Gemini Flash 2.0', inputPerMillion: 0.10,  outputPerMillion: 0.40  },
-    { id: 'meta-llama/llama-4-scout-17b-16e-instruct', name: 'Llama 4 Scout',    inputPerMillion: 0.11,  outputPerMillion: 0.18  },
-    { id: 'google/gemini-2.5-pro-preview',              name: 'Gemini Pro 2.5',   inputPerMillion: 1.25,  outputPerMillion: 10.00 },
-    { id: 'openai/gpt-4o',                              name: 'GPT-4o',           inputPerMillion: 2.50,  outputPerMillion: 10.00 },
-    { id: 'anthropic/claude-sonnet-4',                   name: 'Claude Sonnet 4',  inputPerMillion: 3.00,  outputPerMillion: 15.00 },
+    { id: 'google/gemini-2.5-flash',                    name: 'Gemini 2.5 Flash',  inputPerMillion: 0.15,  outputPerMillion: 0.60  },
+    { id: 'google/gemini-3-flash-preview',              name: 'Gemini 3 Flash',    inputPerMillion: 0.50,  outputPerMillion: 3.00  },
+    { id: 'qwen/qwen3-vl-235b-a22b-instruct',          name: 'Qwen3 VL 235B',     inputPerMillion: 0.20,  outputPerMillion: 0.88  },
+    { id: 'google/gemini-2.5-pro-preview',              name: 'Gemini 2.5 Pro',    inputPerMillion: 1.25,  outputPerMillion: 10.00 },
 ];
 
 const CLEANUP_MODEL = 'google/gemini-flash-2.0';
@@ -298,7 +297,9 @@ app.get('/api/download/:filename', (req, res) => {
         return res.status(404).json({ error: 'File not found' });
     }
 
-    res.download(filePath, (err) => {
+    const displayName = req.query.name || filename;
+
+    res.download(filePath, displayName, (err) => {
         if (err) {
             logger.error('Download error:', err);
             res.status(500).json({ error: 'Download failed' });

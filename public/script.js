@@ -401,7 +401,8 @@ class PDFConverter {
                     }
                     // Download button — show text label for cleaned files
                     const dlFile = converted.cleanTextFile || converted.textFile;
-                    actionsHtml += `<a class="file-action-btn dl-btn" href="/api/download/${dlFile}" download title="Download text file"><i class="fas fa-download"></i> Download</a>`;
+                    const dlName = file.originalName.replace(/\.pdf$/i, converted.cleanTextFile ? '.clean.txt' : '.txt');
+                    actionsHtml += `<a class="file-action-btn dl-btn" href="/api/download/${dlFile}?name=${encodeURIComponent(dlName)}" download title="Download text file"><i class="fas fa-download"></i> Download</a>`;
                 } else if (!converted) {
                     // Disabled cleanup button (teaches feature exists)
                     actionsHtml += `<button class="file-action-btn cleanup-btn" disabled><i class="fas fa-sparkles"></i> Cleanup</button>`;
@@ -871,7 +872,9 @@ class PDFConverter {
         const converted = this.activePreview ? this.convertedMap.get(this.activePreview) : null;
         if (converted) {
             const dlFile = (this.previewMode === 'cleaned' && converted.cleanTextFile) || converted.textFile;
-            this.previewDownload.href = `/api/download/${dlFile}`;
+            const isClean = this.previewMode === 'cleaned' && converted.cleanTextFile;
+            const dlName = this.activePreview.replace(/\.pdf$/i, isClean ? '.clean.txt' : '.txt');
+            this.previewDownload.href = `/api/download/${dlFile}?name=${encodeURIComponent(dlName)}`;
         }
     }
 
