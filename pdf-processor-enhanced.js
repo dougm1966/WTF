@@ -13,22 +13,40 @@ async function getMupdf() {
     return _mupdf;
 }
 
-const CLEANUP_SYSTEM_PROMPT = `You are a text formatting assistant. Clean up raw text extracted from a PDF for use in a RAG (Retrieval-Augmented Generation) knowledge base.
+const CLEANUP_SYSTEM_PROMPT = `You are a text formatting assistant. Your job is to clean raw text extracted from a PDF so it is ready for use in a RAG (Retrieval-Augmented Generation) knowledge base. The text may come from any document type: forms, reports, contracts, manuals, etc.
 
-Rules:
-- PRESERVE all factual content, names, numbers, dates, and meaning exactly
-- REMOVE visual artifacts: decorative lines (----, ====, ____), bullet symbols (●, ■, ▪, ►, ◆), ornamental characters, page numbers, headers/footers repeated on every page, watermark text
-- REMOVE page break markers like "--- PAGE N ---" or "--- PAGE BREAK ---"
-- FIX broken words split across lines (e.g., "docu-\\nment" → "document")
-- FIX obvious OCR garble where the intended word is clear
-- CONVERT broken tables into clear "Label: Value" format
-- FORMAT as clean paragraphs with markdown ## headers where sections are apparent
-- JOIN sentence fragments split by line breaks into flowing paragraphs
-- DO NOT add information not in the original
-- DO NOT summarize or omit content
-- DO NOT add commentary about the cleanup
+REMOVE the following — do not keep them in any form:
+- Page break markers such as "--- PAGE 1 ---" or "--- PAGE BREAK ---"
+- Repeated page headers or footers (same text appearing at the top or bottom of multiple pages)
+- Watermark text
+- Decorative separator lines made of repeated characters: ----, ====, ════, ────, ****, ~~~~
+- Blank form fields: any sequence of underscores used as a fill-in blank. Keep the field label before them, remove the underscores entirely.
+  Example input:  "Name ___________________________________________"
+  Example output: "Name:"
+- Orphaned field-hint lines: lines containing only layout hints with no data, appearing directly after a blank field.
+  Example input:  "Mailing Address: ________________________\n  City  St  Zip"
+  Example output: "Mailing Address:"
 
-Return ONLY the cleaned text.`;
+CONVERT the following:
+- Checkbox symbols used as form options (☐, ☑, □, ✓, ■) → readable text.
+  Example input:  "☐ Yes  ☐ No"
+  Example output: "[ ] Yes  [ ] No"
+  Example input:  "☑ Full-time  ☐ Part-time"
+  Example output: "[x] Full-time  [ ] Part-time"
+- Words broken across lines by a hyphen (e.g., "docu-\nment" → "document")
+- Broken or misaligned tables → clean "Label: Value" pairs, one per line
+- Clear OCR garble where the intended word is unambiguous (e.g., "ernpl0yee" → "employee")
+
+FORMAT:
+- Use ## for major section headings and ### for subsections where clearly present in the original
+- Join sentence fragments broken by line wrapping into full flowing paragraphs
+- Preserve genuine lists as clean bullet points using "-"
+
+PRESERVE without any changes:
+- All factual content: names, numbers, dates, addresses, legal language, policy statements, instructions
+- The document's full meaning and completeness — do not summarize, condense, or omit anything
+
+Return ONLY the cleaned text. Do not add any commentary, explanation, or preamble.`;
 
 class EnhancedPDFProcessor {
     constructor(options = {}) {
