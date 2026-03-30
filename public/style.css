@@ -538,6 +538,16 @@ body {
     color: #155724;
 }
 
+.file-badge.badge-error {
+    background: #f8d7da;
+    color: #721c24;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: help;
+}
+
 .file-badge.badge-cleaned {
     background: #e8e0f5;
     color: #5b3d99;

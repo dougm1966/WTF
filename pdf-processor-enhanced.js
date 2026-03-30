@@ -44,7 +44,7 @@ class EnhancedPDFProcessor {
         if (options.openRouterApiKey) {
             this.visionApiKey = options.openRouterApiKey;
             this.visionBaseURL = 'https://openrouter.ai/api/v1';
-            this.visionModel = options.openRouterModel || 'google/gemini-flash-2.0';
+            this.visionModel = options.openRouterModel || 'google/gemini-3.1-flash-lite-preview';
             this.visionHeaders = {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${options.openRouterApiKey}`,
@@ -147,8 +147,9 @@ class EnhancedPDFProcessor {
     // ─── Vision API (direct fetch, no SDK wrapper) ───
 
     async callVisionAPI(base64Image, pageNum, modelOverride) {
+        const effectiveModel = modelOverride || this.visionModel;
         const body = {
-            model: modelOverride || this.visionModel,
+            model: effectiveModel,
             messages: [{
                 role: 'user',
                 content: [
@@ -165,19 +166,25 @@ class EnhancedPDFProcessor {
             max_tokens: 4000
         };
 
+        this.logger.info(`[Vision] API call: model=${effectiveModel}, page=${pageNum}, imageSize=${Math.round(base64Image.length / 1024)}KB`);
+
         // Retry with exponential backoff
         const maxRetries = 3;
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 120000); // 2 min per page
             try {
                 const response = await fetch(`${this.visionBaseURL}/chat/completions`, {
                     method: 'POST',
                     headers: this.visionHeaders,
-                    body: JSON.stringify(body)
+                    body: JSON.stringify(body),
+                    signal: controller.signal
                 });
 
                 if (!response.ok) {
                     const errorText = await response.text().catch(() => 'unknown');
                     const status = response.status;
+                    this.logger.error(`[Vision] API error ${status} for page ${pageNum}, model=${effectiveModel}: ${errorText.substring(0, 1000)}`);
                     const retryable = [429, 500, 502, 503, 504].includes(status);
 
                     if (retryable && attempt < maxRetries) {
@@ -186,7 +193,7 @@ class EnhancedPDFProcessor {
                         await new Promise(r => setTimeout(r, delay));
                         continue;
                     }
-                    const err = new Error(`API ${status}: ${errorText.substring(0, 200)}`);
+                    const err = new Error(`API ${status}: ${errorText.substring(0, 1000)}`);
                     err.status = status;
                     throw err;
                 }
@@ -199,14 +206,21 @@ class EnhancedPDFProcessor {
                 };
 
             } catch (error) {
+                if (error.name === 'AbortError') {
+                    const err = new Error(`Vision API timed out after 120s for page ${pageNum}`);
+                    err.status = 408;
+                    throw err;
+                }
                 const isClientError = error.status && error.status >= 400 && error.status < 500 && error.status !== 429;
-                if (attempt < maxRetries && error.name !== 'AbortError' && !isClientError) {
+                if (attempt < maxRetries && !isClientError) {
                     const delay = Math.min(1000 * Math.pow(2, attempt), 10000) + Math.random() * 500;
                     this.logger.warn(`[Vision] Page ${pageNum} error "${error.message}", retry ${attempt + 1}/${maxRetries} in ${Math.round(delay)}ms`);
                     await new Promise(r => setTimeout(r, delay));
                     continue;
                 }
                 throw error;
+            } finally {
+                clearTimeout(timeout);
             }
         }
     }
@@ -214,8 +228,9 @@ class EnhancedPDFProcessor {
     // ─── AI Text Cleanup ───
 
     async callTextAPI(text, systemPrompt, model) {
+        const effectiveModel = model || 'google/gemini-3.1-flash-lite-preview';
         const body = {
-            model: model || 'google/gemini-flash-2.0',
+            model: effectiveModel,
             messages: [
                 { role: 'system', content: systemPrompt },
                 { role: 'user', content: text }
@@ -223,18 +238,24 @@ class EnhancedPDFProcessor {
             max_tokens: 8000
         };
 
+        this.logger.info(`[TextAPI] Cleanup call: model=${effectiveModel}, textLen=${text.length}`);
+
         const maxRetries = 3;
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 120000);
             try {
                 const response = await fetch(`${this.visionBaseURL}/chat/completions`, {
                     method: 'POST',
                     headers: this.visionHeaders,
-                    body: JSON.stringify(body)
+                    body: JSON.stringify(body),
+                    signal: controller.signal
                 });
 
                 if (!response.ok) {
                     const errorText = await response.text().catch(() => 'unknown');
                     const status = response.status;
+                    this.logger.error(`[TextAPI] API error ${status}, model=${effectiveModel}: ${errorText.substring(0, 1000)}`);
                     const retryable = [429, 500, 502, 503, 504].includes(status);
 
                     if (retryable && attempt < maxRetries) {
@@ -243,7 +264,7 @@ class EnhancedPDFProcessor {
                         await new Promise(r => setTimeout(r, delay));
                         continue;
                     }
-                    const err = new Error(`API ${status}: ${errorText.substring(0, 200)}`);
+                    const err = new Error(`API ${status}: ${errorText.substring(0, 1000)}`);
                     err.status = status;
                     throw err;
                 }
@@ -256,14 +277,21 @@ class EnhancedPDFProcessor {
                 };
 
             } catch (error) {
+                if (error.name === 'AbortError') {
+                    const err = new Error('Text cleanup API timed out after 120s');
+                    err.status = 408;
+                    throw err;
+                }
                 const isClientError = error.status && error.status >= 400 && error.status < 500 && error.status !== 429;
-                if (attempt < maxRetries && error.name !== 'AbortError' && !isClientError) {
+                if (attempt < maxRetries && !isClientError) {
                     const delay = Math.min(1000 * Math.pow(2, attempt), 10000) + Math.random() * 500;
                     this.logger.warn(`[TextAPI] Error "${error.message}", retry ${attempt + 1}/${maxRetries} in ${Math.round(delay)}ms`);
                     await new Promise(r => setTimeout(r, delay));
                     continue;
                 }
                 throw error;
+            } finally {
+                clearTimeout(timeout);
             }
         }
     }
@@ -679,6 +707,11 @@ class EnhancedPDFProcessor {
 
             } catch (pageError) {
                 this.logger.error(`[Vision] Page ${page} failed: ${pageError.message}`);
+                // If this is a client error (auth, model not found, bad request), abort immediately —
+                // every subsequent page will fail with the same error
+                if (pageError.status && pageError.status >= 400 && pageError.status < 500 && pageError.status !== 429) {
+                    throw new Error(`Vision API client error (HTTP ${pageError.status}): ${pageError.message}`);
+                }
             }
         }
 

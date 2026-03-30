@@ -18,16 +18,16 @@ const mime = require('mime-types');
 const EnhancedPDFProcessor = require('./pdf-processor-enhanced');
 const HistoryStore = require('./history');
 
-// Available vision models (ranked by document extraction quality — OmniDocBench benchmarks)
+// Available vision models (verified against OpenRouter /api/v1/models on 2026-03-30)
 const AVAILABLE_MODELS = [
-    { id: 'google/gemini-2.5-flash',                    name: 'Gemini 2.5 Flash',  inputPerMillion: 0.15,  outputPerMillion: 0.60  },
-    { id: 'google/gemini-3-flash-preview',              name: 'Gemini 3 Flash',    inputPerMillion: 0.50,  outputPerMillion: 3.00  },
-    { id: 'qwen/qwen3-vl-235b-a22b-instruct',          name: 'Qwen3 VL 235B',     inputPerMillion: 0.20,  outputPerMillion: 0.88  },
-    { id: 'google/gemini-2.5-pro-preview',              name: 'Gemini 2.5 Pro',    inputPerMillion: 1.25,  outputPerMillion: 10.00 },
+    { id: 'google/gemini-3.1-flash-lite-preview',  name: 'Gemini 3.1 Flash Lite',  inputPerMillion: 0.25,  outputPerMillion: 1.50  },
+    { id: 'google/gemini-3-flash-preview',          name: 'Gemini 3 Flash',          inputPerMillion: 0.50,  outputPerMillion: 3.00  },
+    { id: 'qwen/qwen3.5-122b-a10b',                name: 'Qwen 3.5 VL 122B',       inputPerMillion: 0.26,  outputPerMillion: 2.08  },
+    { id: 'google/gemini-3.1-pro-preview',          name: 'Gemini 3.1 Pro',          inputPerMillion: 2.00,  outputPerMillion: 12.00 },
 ];
 
-const CLEANUP_MODEL = 'google/gemini-flash-2.0';
-const CLEANUP_PRICING = { inputPerMillion: 0.10, outputPerMillion: 0.40 };
+const CLEANUP_MODEL = 'google/gemini-3.1-flash-lite-preview';
+const CLEANUP_PRICING = { inputPerMillion: 0.25, outputPerMillion: 1.50 };
 
 function getModelPricing(modelId) {
     return AVAILABLE_MODELS.find(m => m.id === modelId) || AVAILABLE_MODELS[0];
@@ -546,6 +546,98 @@ app.get('/api/config', (req, res) => {
     });
 });
 
+// ── Vision Diagnostic Endpoint ──
+
+// Minimal 1x1 white PNG for testing (68 bytes)
+const TEST_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==';
+
+app.get('/api/vision-test', async (req, res) => {
+    const result = {
+        apiKeySet: !!process.env.OPENROUTER_API_KEY,
+        keyValid: false,
+        keyLabel: null,
+        models: {},
+        testCall: null
+    };
+
+    if (!process.env.OPENROUTER_API_KEY) {
+        return res.json({ ...result, error: 'OPENROUTER_API_KEY not set in environment' });
+    }
+
+    // Step 1: Validate API key
+    try {
+        const keyRes = await fetch('https://openrouter.ai/api/v1/auth/key', {
+            headers: { 'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}` }
+        });
+        if (keyRes.ok) {
+            const keyData = await keyRes.json();
+            result.keyValid = true;
+            result.keyLabel = keyData.data?.label || 'unlabeled';
+        } else {
+            result.keyValid = false;
+            result.keyLabel = `HTTP ${keyRes.status}`;
+        }
+    } catch (e) {
+        result.keyLabel = `Error: ${e.message}`;
+    }
+
+    // Step 2: Validate model IDs
+    try {
+        const modelsRes = await fetch('https://openrouter.ai/api/v1/models');
+        if (modelsRes.ok) {
+            const modelsData = await modelsRes.json();
+            const validIds = new Set((modelsData.data || []).map(m => m.id));
+            for (const model of AVAILABLE_MODELS) {
+                result.models[model.id] = validIds.has(model.id) ? 'valid' : 'NOT FOUND';
+            }
+            result.models[CLEANUP_MODEL] = validIds.has(CLEANUP_MODEL) ? 'valid' : 'NOT FOUND';
+        }
+    } catch (e) {
+        result.models._error = e.message;
+    }
+
+    // Step 3: Test vision call with tiny image
+    try {
+        const start = Date.now();
+        const testModel = AVAILABLE_MODELS[0].id;
+        const testRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+                'X-Title': 'Pdf2Txt Vision Test'
+            },
+            body: JSON.stringify({
+                model: testModel,
+                messages: [{
+                    role: 'user',
+                    content: [
+                        { type: 'text', text: 'Describe this image in one word.' },
+                        { type: 'image_url', image_url: { url: `data:image/png;base64,${TEST_PNG_BASE64}` } }
+                    ]
+                }],
+                max_tokens: 50
+            })
+        });
+        const latency = Date.now() - start;
+        const body = await testRes.text();
+        result.testCall = {
+            model: testModel,
+            success: testRes.ok,
+            status: testRes.status,
+            latencyMs: latency,
+            response: body.substring(0, 500)
+        };
+        if (!testRes.ok) {
+            result.testCall.error = body.substring(0, 1000);
+        }
+    } catch (e) {
+        result.testCall = { success: false, error: e.message };
+    }
+
+    res.json(result);
+});
+
 // ── Classification API ──
 
 // Classify uploaded PDFs into text/ocr/vision groups
@@ -913,6 +1005,49 @@ async function startServer() {
         if (!cachedHealth.visionAPI.available && pdfProcessor.useVision) {
             logger.warn('Vision API not reachable — Vision extraction will fail');
         }
+
+        // Validate OpenRouter API key and model IDs
+        if (process.env.OPENROUTER_API_KEY) {
+            try {
+                const keyRes = await fetch('https://openrouter.ai/api/v1/auth/key', {
+                    headers: { 'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}` }
+                });
+                if (keyRes.ok) {
+                    const keyData = await keyRes.json();
+                    logger.info(`OpenRouter API key valid (label: ${keyData.data?.label || 'none'})`);
+                } else {
+                    logger.error(`OpenRouter API key INVALID (HTTP ${keyRes.status}) — Vision and AI Cleanup will fail`);
+                    console.error('WARNING: OpenRouter API key is invalid. Vision extraction will not work.');
+                }
+            } catch (e) {
+                logger.warn(`Could not validate OpenRouter API key: ${e.message}`);
+            }
+
+            try {
+                const modelsRes = await fetch('https://openrouter.ai/api/v1/models');
+                if (modelsRes.ok) {
+                    const modelsData = await modelsRes.json();
+                    const validIds = new Set((modelsData.data || []).map(m => m.id));
+                    const invalid = AVAILABLE_MODELS.filter(m => !validIds.has(m.id)).map(m => m.id);
+                    const valid = AVAILABLE_MODELS.filter(m => validIds.has(m.id)).map(m => m.id);
+                    if (valid.length > 0) logger.info(`Validated vision models: ${valid.join(', ')}`);
+                    if (invalid.length > 0) {
+                        logger.error(`INVALID model IDs (will fail at runtime): ${invalid.join(', ')}`);
+                        console.error(`WARNING: These model IDs are not found on OpenRouter: ${invalid.join(', ')}`);
+                    }
+                    if (!validIds.has(CLEANUP_MODEL)) {
+                        logger.error(`INVALID cleanup model: ${CLEANUP_MODEL}`);
+                        console.error(`WARNING: Cleanup model ${CLEANUP_MODEL} not found on OpenRouter`);
+                    }
+                }
+            } catch (e) {
+                logger.warn(`Could not validate model IDs: ${e.message}`);
+            }
+        } else {
+            logger.warn('OPENROUTER_API_KEY not set — Vision and AI Cleanup will not work');
+            console.warn('WARNING: OPENROUTER_API_KEY not set. Vision extraction disabled.');
+        }
+
         // Refresh health every 5 minutes
         setInterval(async () => {
             cachedHealth = await pdfProcessor.checkDependencies();

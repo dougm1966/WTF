@@ -380,7 +380,13 @@ class PDFConverter {
 
                 // Build state badge
                 let badgeHtml = '';
-                if (converted && converted.status === 'success') {
+                if (converted && converted.status === 'error') {
+                    const errText = converted.errorDetails
+                        ? Object.entries(converted.errorDetails).map(([k, v]) => `${k}: ${v}`).join('; ')
+                        : converted.error || 'Unknown error';
+                    const safeErr = errText.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+                    badgeHtml = `<span class="file-badge badge-error" title="${safeErr}">${safeErr.substring(0, 80)}</span>`;
+                } else if (converted && converted.status === 'success') {
                     if (converted.cleanTextFile) {
                         badgeHtml = '<span class="file-badge badge-cleaned"><i class="fas fa-sparkles"></i> Cleaned</span>';
                     } else if (converted.cleanupStatus === 'cleaning') {
@@ -611,7 +617,8 @@ class PDFConverter {
             } else if (status.status === 'failed') {
                 this.groupStatus[groupName] = 'idle';
                 this.renderGroupedFileList();
-                this.notify(`${groupName} conversion failed`, 'error');
+                const errMsgs = (status.messages || []).filter(m => m.type === 'error').map(m => m.text).join(' | ');
+                this.notify(errMsgs || `${groupName} conversion failed`, 'error');
             } else {
                 this.groupPollers[groupName] = setTimeout(() => this.pollGroupProgress(groupName), 1000);
             }
@@ -640,7 +647,9 @@ class PDFConverter {
                     textFile: r.textFile || null,
                     cleanTextFile: r.cleanTextFile || null,
                     cleanupStatus: null,
-                    cost: r.cost || 0
+                    cost: r.cost || 0,
+                    error: r.error || null,
+                    errorDetails: r.errorDetails || null
                 });
             });
 
