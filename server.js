@@ -26,8 +26,8 @@ const AVAILABLE_MODELS = [
     { id: 'google/gemini-3.1-pro-preview',          name: 'Gemini 3.1 Pro',          inputPerMillion: 2.00,  outputPerMillion: 12.00 },
 ];
 
-const CLEANUP_MODEL = 'google/gemini-3.1-flash-lite-preview';
-const CLEANUP_PRICING = { inputPerMillion: 0.25, outputPerMillion: 1.50 };
+const CLEANUP_MODEL = 'nvidia/nemotron-3-super-120b-a12b:free';
+const CLEANUP_PRICING = { inputPerMillion: 0, outputPerMillion: 0 };
 
 function getModelPricing(modelId) {
     return AVAILABLE_MODELS.find(m => m.id === modelId) || AVAILABLE_MODELS[0];
@@ -331,7 +331,10 @@ app.get('/api/download/batch/:jobId', async (req, res) => {
         const successfulResults = job.results.filter(r => r.status === 'success');
         
         for (const result of successfulResults) {
-            const filePath = path.join('uploads/texts', result.textFile);
+            const cleanFile = result.textFile.replace(/\.txt$/, '.clean.txt');
+            const cleanPath = path.join('uploads/texts', cleanFile);
+            const rawPath = path.join('uploads/texts', result.textFile);
+            const filePath = fs.existsSync(cleanPath) ? cleanPath : rawPath;
             if (fs.existsSync(filePath)) {
                 archive.file(filePath, { name: result.originalName.replace('.pdf', '.txt') });
             }
