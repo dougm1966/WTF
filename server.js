@@ -599,7 +599,39 @@ app.get('/api/vision-test', async (req, res) => {
         result.models._error = e.message;
     }
 
-    // Step 3: Test vision call with tiny image
+    // Step 3: Test cleanup model (text completion)
+    try {
+        const start = Date.now();
+        const cleanupRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+                'X-Title': 'Pdf2Txt Cleanup Test'
+            },
+            body: JSON.stringify({
+                model: CLEANUP_MODEL,
+                messages: [
+                    { role: 'system', content: 'You are a text formatter. Return only cleaned text.' },
+                    { role: 'user', content: 'Hello world.' }
+                ],
+                max_tokens: 50
+            })
+        });
+        const latency = Date.now() - start;
+        const cleanupBody = await cleanupRes.text();
+        result.cleanupTest = {
+            model: CLEANUP_MODEL,
+            success: cleanupRes.ok,
+            status: cleanupRes.status,
+            latencyMs: latency,
+            response: cleanupBody.substring(0, 500)
+        };
+    } catch (e) {
+        result.cleanupTest = { success: false, error: e.message };
+    }
+
+    // Step 4: Test vision call with tiny image
     try {
         const start = Date.now();
         const testModel = AVAILABLE_MODELS[0].id;
