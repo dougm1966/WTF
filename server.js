@@ -26,7 +26,7 @@ const AVAILABLE_MODELS = [
     { id: 'google/gemini-3.1-pro-preview',          name: 'Gemini 3.1 Pro',          inputPerMillion: 2.00,  outputPerMillion: 12.00 },
 ];
 
-const CLEANUP_MODEL = 'nvidia/nemotron-3-super-120b-a12b:free';
+const CLEANUP_MODEL = 'qwen/qwen3.6-plus-preview:free';
 const CLEANUP_PRICING = { inputPerMillion: 0, outputPerMillion: 0 };
 
 function getModelPricing(modelId) {

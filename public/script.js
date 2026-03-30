@@ -1025,6 +1025,7 @@ class PDFConverter {
                         } else {
                             const entry = this.convertedMap.get(r.originalName);
                             if (entry) entry.cleanupStatus = null;
+                            this.notify(`Cleanup failed: ${r.originalName} — ${r.error || 'unknown error'}`, 'error');
                         }
                     });
                     this.usageTracker.data.cost += totalCleanupCost;
