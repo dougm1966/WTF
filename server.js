@@ -18,12 +18,10 @@ const mime = require('mime-types');
 const EnhancedPDFProcessor = require('./pdf-processor-enhanced');
 const HistoryStore = require('./history');
 
-// Available vision models (verified against OpenRouter /api/v1/models on 2026-03-30)
+// Available vision models
 const AVAILABLE_MODELS = [
-    { id: 'google/gemini-3.1-flash-lite-preview',  name: 'Gemini 3.1 Flash Lite',  inputPerMillion: 0.25,  outputPerMillion: 1.50  },
-    { id: 'google/gemini-3-flash-preview',          name: 'Gemini 3 Flash',          inputPerMillion: 0.50,  outputPerMillion: 3.00  },
-    { id: 'qwen/qwen3.5-122b-a10b',                name: 'Qwen 3.5 VL 122B',       inputPerMillion: 0.26,  outputPerMillion: 2.08  },
-    { id: 'google/gemini-3.1-pro-preview',          name: 'Gemini 3.1 Pro',          inputPerMillion: 2.00,  outputPerMillion: 12.00 },
+    { id: 'meta-llama/llama-4-scout',             name: 'Fast',           inputPerMillion: 0.08,  outputPerMillion: 0.30, provider: { order: ['Groq'], allow_fallbacks: true } },
+    { id: 'google/gemini-3.1-flash-lite-preview', name: 'Better Quality', inputPerMillion: 0.25,  outputPerMillion: 1.50, provider: null },
 ];
 
 const CLEANUP_MODEL = 'meta-llama/llama-3.3-70b-instruct';
@@ -779,6 +777,7 @@ app.post('/api/convert-group', express.json(), async (req, res) => {
 
         const selectedModel = model || AVAILABLE_MODELS[0].id;
         const modelConfig = getModelPricing(selectedModel);
+        const modelProvider = AVAILABLE_MODELS.find(m => m.id === selectedModel)?.provider || null;
 
         const jobId = uuidv4();
         const job = {
@@ -791,6 +790,7 @@ app.post('/api/convert-group', express.json(), async (req, res) => {
             })),
             model: selectedModel,
             modelPricing: modelConfig,
+            modelProvider,
             forceMethod: forceMethod || null,
             status: 'queued',
             progress: 0,
@@ -842,6 +842,7 @@ async function processJob(jobId) {
                 // Process the PDF file with selected model and optional forced method
                 const result = await pdfProcessor.processPDF(file.path, file.originalName, {
                     model: job.model,
+                    modelProvider: job.modelProvider || null,
                     forceMethod: job.forceMethod || null
                 });
 

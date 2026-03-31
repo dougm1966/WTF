@@ -113,7 +113,7 @@ class PDFConverter {
         this.previewTextCache = {}; // { raw: string, cleaned: string }
         this.previewMode = 'cleaned'; // 'raw' or 'cleaned'
         this.availableModels = [];
-        this.selectedModel = 'google/gemini-flash-2.0';
+        this.selectedModel = 'meta-llama/llama-4-scout';
         this.usageTracker = new UsageTracker();
         this.sessionPersistence = new SessionPersistence();
 

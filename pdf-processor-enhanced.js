@@ -164,7 +164,7 @@ class EnhancedPDFProcessor {
 
     // ─── Vision API (direct fetch, no SDK wrapper) ───
 
-    async callVisionAPI(base64Image, pageNum, modelOverride) {
+    async callVisionAPI(base64Image, pageNum, modelOverride, provider = null) {
         const effectiveModel = modelOverride || this.visionModel;
         const body = {
             model: effectiveModel,
@@ -184,6 +184,7 @@ class EnhancedPDFProcessor {
             max_tokens: 4000,
             include_reasoning: false
         };
+        if (provider) body.provider = provider;
 
         this.logger.info(`[Vision] API call: model=${effectiveModel}, page=${pageNum}, imageSize=${Math.round(base64Image.length / 1024)}KB`);
 
@@ -531,7 +532,7 @@ class EnhancedPDFProcessor {
             // Method 3: Vision API
             if (!extractionResult && tryVision) {
                 try {
-                    extractionResult = await this.extractTextWithVision(filePath, options.model);
+                    extractionResult = await this.extractTextWithVision(filePath, options.model, options.modelProvider || null);
                     result.extractionMethod = 'vision';
                     if (extractionResult.usage) {
                         result.usage = extractionResult.usage;
@@ -688,7 +689,7 @@ class EnhancedPDFProcessor {
         return { text: fullText, numpages: pageCount, method: 'ocr' };
     }
 
-    async extractTextWithVision(filePath, modelOverride) {
+    async extractTextWithVision(filePath, modelOverride, provider = null) {
         if (!this.visionApiKey) {
             throw new Error('Vision API not configured');
         }
@@ -720,7 +721,7 @@ class EnhancedPDFProcessor {
                 const base64Image = buffer.toString('base64');
                 this.logger.info(`[Vision] Sending page ${page}/${images.length} (${Math.round(base64Image.length / 1024)}KB)`);
 
-                const result = await this.callVisionAPI(base64Image, page, modelOverride);
+                const result = await this.callVisionAPI(base64Image, page, modelOverride, provider);
 
                 totalPromptTokens += result.promptTokens;
                 totalCompletionTokens += result.completionTokens;
