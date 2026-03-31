@@ -249,7 +249,7 @@ class EnhancedPDFProcessor {
 
     // ─── AI Text Cleanup ───
 
-    async callTextAPI(text, systemPrompt, model) {
+    async callTextAPI(text, systemPrompt, model, provider = null) {
         const effectiveModel = model || 'google/gemini-3.1-flash-lite-preview';
         const body = {
             model: effectiveModel,
@@ -259,6 +259,7 @@ class EnhancedPDFProcessor {
             ],
             max_tokens: 8000
         };
+        if (provider) body.provider = provider;
 
         this.logger.info(`[TextAPI] Cleanup call: model=${effectiveModel}, textLen=${text.length}`);
 
@@ -318,7 +319,7 @@ class EnhancedPDFProcessor {
         }
     }
 
-    async aiCleanupText(text, model) {
+    async aiCleanupText(text, model, provider = null) {
         const CHUNK_CHAR_LIMIT = 12000;
         const pagePattern = /---\s*PAGE\s+(?:BREAK|\d+)\s*---/g;
 
@@ -348,7 +349,7 @@ class EnhancedPDFProcessor {
 
         for (let i = 0; i < chunks.length; i++) {
             this.logger.info(`[AICleanup] Chunk ${i + 1}/${chunks.length} (${chunks[i].length} chars)`);
-            const result = await this.callTextAPI(chunks[i], CLEANUP_SYSTEM_PROMPT, model);
+            const result = await this.callTextAPI(chunks[i], CLEANUP_SYSTEM_PROMPT, model, provider);
             cleanedChunks.push(result.text);
             totalPromptTokens += result.promptTokens;
             totalCompletionTokens += result.completionTokens;

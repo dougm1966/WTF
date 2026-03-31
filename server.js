@@ -26,8 +26,9 @@ const AVAILABLE_MODELS = [
     { id: 'google/gemini-3.1-pro-preview',          name: 'Gemini 3.1 Pro',          inputPerMillion: 2.00,  outputPerMillion: 12.00 },
 ];
 
-const CLEANUP_MODEL = 'qwen/qwen3.6-plus-preview:free';
-const CLEANUP_PRICING = { inputPerMillion: 0, outputPerMillion: 0 };
+const CLEANUP_MODEL = 'meta-llama/llama-3.3-70b-instruct';
+const CLEANUP_PROVIDER = { order: ['Groq'], allow_fallbacks: true };
+const CLEANUP_PRICING = { inputPerMillion: 0.12, outputPerMillion: 0.12 };
 
 function getModelPricing(modelId) {
     return AVAILABLE_MODELS.find(m => m.id === modelId) || AVAILABLE_MODELS[0];
@@ -411,7 +412,7 @@ app.post('/api/cleanup', express.json(), async (req, res) => {
         }
 
         const rawText = await fs.promises.readFile(rawPath, 'utf8');
-        const cleanup = await pdfProcessor.aiCleanupText(rawText, CLEANUP_MODEL);
+        const cleanup = await pdfProcessor.aiCleanupText(rawText, CLEANUP_MODEL, CLEANUP_PROVIDER);
 
         const cleanFilename = filename.replace(/\.txt$/, '.clean.txt');
         const cleanPath = path.join('uploads/texts', cleanFilename);
@@ -482,7 +483,7 @@ app.post('/api/cleanup-batch', express.json(), async (req, res) => {
                         }
 
                         const rawText = await fs.promises.readFile(rawPath, 'utf8');
-                        const cleanup = await pdfProcessor.aiCleanupText(rawText, CLEANUP_MODEL);
+                        const cleanup = await pdfProcessor.aiCleanupText(rawText, CLEANUP_MODEL, CLEANUP_PROVIDER);
 
                         const cleanFilename = file.filename.replace(/\.txt$/, '.clean.txt');
                         const cleanPath = path.join('uploads/texts', cleanFilename);
