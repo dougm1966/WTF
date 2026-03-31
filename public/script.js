@@ -113,7 +113,7 @@ class PDFConverter {
         this.previewTextCache = {}; // { raw: string, cleaned: string }
         this.previewMode = 'cleaned'; // 'raw' or 'cleaned'
         this.availableModels = [];
-        this.selectedModel = 'meta-llama/llama-4-scout';
+        this.selectedModel = 'meta-llama/llama-4-scout-17b-16e-instruct';
         this.usageTracker = new UsageTracker();
         this.sessionPersistence = new SessionPersistence();
 

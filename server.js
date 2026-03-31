@@ -20,12 +20,11 @@ const HistoryStore = require('./history');
 
 // Available vision models
 const AVAILABLE_MODELS = [
-    { id: 'meta-llama/llama-4-scout',             name: 'Fast',           inputPerMillion: 0.08,  outputPerMillion: 0.30, provider: { order: ['Groq'], allow_fallbacks: true } },
-    { id: 'google/gemini-3.1-flash-lite-preview', name: 'Better Quality', inputPerMillion: 0.25,  outputPerMillion: 1.50, provider: null },
+    { id: 'meta-llama/llama-4-scout-17b-16e-instruct', name: 'Fast',           inputPerMillion: 0.08,  outputPerMillion: 0.30, useGroq: true },
+    { id: 'google/gemini-3.1-flash-lite-preview',      name: 'Better Quality', inputPerMillion: 0.25,  outputPerMillion: 1.50, useGroq: false },
 ];
 
-const CLEANUP_MODEL = 'meta-llama/llama-3.3-70b-instruct';
-const CLEANUP_PROVIDER = { order: ['Groq'], allow_fallbacks: true };
+const CLEANUP_MODEL = 'llama-3.3-70b-versatile';
 const CLEANUP_PRICING = { inputPerMillion: 0.12, outputPerMillion: 0.12 };
 
 function getModelPricing(modelId) {
@@ -170,6 +169,7 @@ const pdfProcessor = new EnhancedPDFProcessor({
     concurrency: parseInt(process.env.CONCURRENT_PROCESSING) || 3,
     tempDir: 'uploads/temp',
     outputDir: 'uploads/texts',
+    groqApiKey: process.env.GROQ_API_KEY,
     openRouterApiKey: process.env.OPENROUTER_API_KEY,
     openRouterModel: process.env.OPENROUTER_MODEL,
     openaiApiKey: process.env.OPENAI_API_KEY,
@@ -410,7 +410,7 @@ app.post('/api/cleanup', express.json(), async (req, res) => {
         }
 
         const rawText = await fs.promises.readFile(rawPath, 'utf8');
-        const cleanup = await pdfProcessor.aiCleanupText(rawText, CLEANUP_MODEL, CLEANUP_PROVIDER);
+        const cleanup = await pdfProcessor.aiCleanupText(rawText, CLEANUP_MODEL, !!process.env.GROQ_API_KEY);
 
         const cleanFilename = filename.replace(/\.txt$/, '.clean.txt');
         const cleanPath = path.join('uploads/texts', cleanFilename);
@@ -481,7 +481,7 @@ app.post('/api/cleanup-batch', express.json(), async (req, res) => {
                         }
 
                         const rawText = await fs.promises.readFile(rawPath, 'utf8');
-                        const cleanup = await pdfProcessor.aiCleanupText(rawText, CLEANUP_MODEL, CLEANUP_PROVIDER);
+                        const cleanup = await pdfProcessor.aiCleanupText(rawText, CLEANUP_MODEL, !!process.env.GROQ_API_KEY);
 
                         const cleanFilename = file.filename.replace(/\.txt$/, '.clean.txt');
                         const cleanPath = path.join('uploads/texts', cleanFilename);
@@ -562,111 +562,117 @@ app.get('/api/vision-test', async (req, res) => {
         testCall: null
     };
 
-    if (!process.env.OPENROUTER_API_KEY) {
-        return res.json({ ...result, error: 'OPENROUTER_API_KEY not set in environment' });
+    result.groqKeySet = !!process.env.GROQ_API_KEY;
+    result.openRouterKeySet = !!process.env.OPENROUTER_API_KEY;
+
+    if (!process.env.GROQ_API_KEY && !process.env.OPENROUTER_API_KEY) {
+        return res.json({ ...result, error: 'Neither GROQ_API_KEY nor OPENROUTER_API_KEY is set' });
     }
 
-    // Step 1: Validate API key
-    try {
-        const keyRes = await fetch('https://openrouter.ai/api/v1/auth/key', {
-            headers: { 'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}` }
-        });
-        if (keyRes.ok) {
-            const keyData = await keyRes.json();
-            result.keyValid = true;
-            result.keyLabel = keyData.data?.label || 'unlabeled';
-        } else {
-            result.keyValid = false;
-            result.keyLabel = `HTTP ${keyRes.status}`;
-        }
-    } catch (e) {
-        result.keyLabel = `Error: ${e.message}`;
-    }
-
-    // Step 2: Validate model IDs
-    try {
-        const modelsRes = await fetch('https://openrouter.ai/api/v1/models');
-        if (modelsRes.ok) {
-            const modelsData = await modelsRes.json();
-            const validIds = new Set((modelsData.data || []).map(m => m.id));
-            for (const model of AVAILABLE_MODELS) {
-                result.models[model.id] = validIds.has(model.id) ? 'valid' : 'NOT FOUND';
+    // Step 1: Validate OpenRouter API key (for Better Quality model)
+    if (process.env.OPENROUTER_API_KEY) {
+        try {
+            const keyRes = await fetch('https://openrouter.ai/api/v1/auth/key', {
+                headers: { 'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}` }
+            });
+            if (keyRes.ok) {
+                const keyData = await keyRes.json();
+                result.keyValid = true;
+                result.keyLabel = keyData.data?.label || 'unlabeled';
+            } else {
+                result.keyValid = false;
+                result.keyLabel = `HTTP ${keyRes.status}`;
             }
-            result.models[CLEANUP_MODEL] = validIds.has(CLEANUP_MODEL) ? 'valid' : 'NOT FOUND';
+        } catch (e) {
+            result.keyLabel = `Error: ${e.message}`;
         }
-    } catch (e) {
-        result.models._error = e.message;
+
+        // Validate OpenRouter model IDs (only non-Groq models)
+        try {
+            const modelsRes = await fetch('https://openrouter.ai/api/v1/models');
+            if (modelsRes.ok) {
+                const modelsData = await modelsRes.json();
+                const validIds = new Set((modelsData.data || []).map(m => m.id));
+                for (const model of AVAILABLE_MODELS.filter(m => !m.useGroq)) {
+                    result.models[model.id] = validIds.has(model.id) ? 'valid' : 'NOT FOUND';
+                }
+            }
+        } catch (e) {
+            result.models._error = e.message;
+        }
     }
 
-    // Step 3: Test cleanup model (text completion)
-    try {
-        const start = Date.now();
-        const cleanupRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-                'X-Title': 'Pdf2Txt Cleanup Test'
-            },
-            body: JSON.stringify({
+    // Step 2: Test cleanup model (Groq direct)
+    if (process.env.GROQ_API_KEY) {
+        try {
+            const start = Date.now();
+            const cleanupRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: CLEANUP_MODEL,
+                    messages: [
+                        { role: 'system', content: 'You are a text formatter. Return only cleaned text.' },
+                        { role: 'user', content: 'Hello world.' }
+                    ],
+                    max_tokens: 50
+                })
+            });
+            const latency = Date.now() - start;
+            const cleanupBody = await cleanupRes.text();
+            result.cleanupTest = {
                 model: CLEANUP_MODEL,
-                messages: [
-                    { role: 'system', content: 'You are a text formatter. Return only cleaned text.' },
-                    { role: 'user', content: 'Hello world.' }
-                ],
-                max_tokens: 50
-            })
-        });
-        const latency = Date.now() - start;
-        const cleanupBody = await cleanupRes.text();
-        result.cleanupTest = {
-            model: CLEANUP_MODEL,
-            success: cleanupRes.ok,
-            status: cleanupRes.status,
-            latencyMs: latency,
-            response: cleanupBody.substring(0, 500)
-        };
-    } catch (e) {
-        result.cleanupTest = { success: false, error: e.message };
-    }
-
-    // Step 4: Test vision call with tiny image
-    try {
-        const start = Date.now();
-        const testModel = AVAILABLE_MODELS[0].id;
-        const testRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-                'X-Title': 'Pdf2Txt Vision Test'
-            },
-            body: JSON.stringify({
-                model: testModel,
-                messages: [{
-                    role: 'user',
-                    content: [
-                        { type: 'text', text: 'Describe this image in one word.' },
-                        { type: 'image_url', image_url: { url: `data:image/png;base64,${TEST_PNG_BASE64}` } }
-                    ]
-                }],
-                max_tokens: 50
-            })
-        });
-        const latency = Date.now() - start;
-        const body = await testRes.text();
-        result.testCall = {
-            model: testModel,
-            success: testRes.ok,
-            status: testRes.status,
-            latencyMs: latency,
-            response: body.substring(0, 500)
-        };
-        if (!testRes.ok) {
-            result.testCall.error = body.substring(0, 1000);
+                via: 'Groq direct',
+                success: cleanupRes.ok,
+                status: cleanupRes.status,
+                latencyMs: latency,
+                response: cleanupBody.substring(0, 500)
+            };
+        } catch (e) {
+            result.cleanupTest = { success: false, error: e.message };
         }
-    } catch (e) {
-        result.testCall = { success: false, error: e.message };
+
+        // Step 3: Test Fast vision model (Groq direct)
+        try {
+            const start = Date.now();
+            const testModel = AVAILABLE_MODELS[0].id;
+            const testRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: testModel,
+                    messages: [{
+                        role: 'user',
+                        content: [
+                            { type: 'text', text: 'Describe this image in one word.' },
+                            { type: 'image_url', image_url: { url: `data:image/png;base64,${TEST_PNG_BASE64}` } }
+                        ]
+                    }],
+                    max_tokens: 50
+                })
+            });
+            const latency = Date.now() - start;
+            const body = await testRes.text();
+            result.testCall = {
+                model: testModel,
+                via: 'Groq direct',
+                success: testRes.ok,
+                status: testRes.status,
+                latencyMs: latency,
+                response: body.substring(0, 500)
+            };
+            if (!testRes.ok) {
+                result.testCall.error = body.substring(0, 1000);
+            }
+        } catch (e) {
+            result.testCall = { success: false, error: e.message };
+        }
     }
 
     res.json(result);
@@ -777,7 +783,7 @@ app.post('/api/convert-group', express.json(), async (req, res) => {
 
         const selectedModel = model || AVAILABLE_MODELS[0].id;
         const modelConfig = getModelPricing(selectedModel);
-        const modelProvider = AVAILABLE_MODELS.find(m => m.id === selectedModel)?.provider || null;
+        const useGroq = AVAILABLE_MODELS.find(m => m.id === selectedModel)?.useGroq || false;
 
         const jobId = uuidv4();
         const job = {
@@ -790,7 +796,7 @@ app.post('/api/convert-group', express.json(), async (req, res) => {
             })),
             model: selectedModel,
             modelPricing: modelConfig,
-            modelProvider,
+            useGroq,
             forceMethod: forceMethod || null,
             status: 'queued',
             progress: 0,
@@ -842,7 +848,7 @@ async function processJob(jobId) {
                 // Process the PDF file with selected model and optional forced method
                 const result = await pdfProcessor.processPDF(file.path, file.originalName, {
                     model: job.model,
-                    modelProvider: job.modelProvider || null,
+                    useGroq: job.useGroq || false,
                     forceMethod: job.forceMethod || null
                 });
 
@@ -1065,24 +1071,27 @@ async function startServer() {
                 if (modelsRes.ok) {
                     const modelsData = await modelsRes.json();
                     const validIds = new Set((modelsData.data || []).map(m => m.id));
-                    const invalid = AVAILABLE_MODELS.filter(m => !validIds.has(m.id)).map(m => m.id);
-                    const valid = AVAILABLE_MODELS.filter(m => validIds.has(m.id)).map(m => m.id);
-                    if (valid.length > 0) logger.info(`Validated vision models: ${valid.join(', ')}`);
+                    const orModels = AVAILABLE_MODELS.filter(m => !m.useGroq);
+                    const invalid = orModels.filter(m => !validIds.has(m.id)).map(m => m.id);
+                    const valid = orModels.filter(m => validIds.has(m.id)).map(m => m.id);
+                    if (valid.length > 0) logger.info(`Validated OpenRouter models: ${valid.join(', ')}`);
                     if (invalid.length > 0) {
-                        logger.error(`INVALID model IDs (will fail at runtime): ${invalid.join(', ')}`);
+                        logger.error(`INVALID OpenRouter model IDs (will fail at runtime): ${invalid.join(', ')}`);
                         console.error(`WARNING: These model IDs are not found on OpenRouter: ${invalid.join(', ')}`);
-                    }
-                    if (!validIds.has(CLEANUP_MODEL)) {
-                        logger.error(`INVALID cleanup model: ${CLEANUP_MODEL}`);
-                        console.error(`WARNING: Cleanup model ${CLEANUP_MODEL} not found on OpenRouter`);
                     }
                 }
             } catch (e) {
                 logger.warn(`Could not validate model IDs: ${e.message}`);
             }
         } else {
-            logger.warn('OPENROUTER_API_KEY not set — Vision and AI Cleanup will not work');
-            console.warn('WARNING: OPENROUTER_API_KEY not set. Vision extraction disabled.');
+            logger.warn('OPENROUTER_API_KEY not set — Better Quality vision model unavailable');
+        }
+
+        if (process.env.GROQ_API_KEY) {
+            logger.info('GROQ_API_KEY set — Fast vision model and AI Cleanup will use Groq direct');
+        } else {
+            logger.warn('GROQ_API_KEY not set — Fast vision model and AI Cleanup will not work');
+            console.warn('WARNING: GROQ_API_KEY not set. Fast vision and cleanup disabled.');
         }
 
         // Refresh health every 5 minutes

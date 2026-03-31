@@ -58,7 +58,17 @@ class EnhancedPDFProcessor {
         this.maxVisionPages = null; // no page cap — process all pages
         this.logger = options.logger || console;
 
-        // OpenRouter / OpenAI Vision config (called directly via fetch, no SDK wrapper)
+        // Groq direct API config (used for cleanup and Fast vision model)
+        if (options.groqApiKey) {
+            this.groqApiKey = options.groqApiKey;
+            this.groqBaseURL = 'https://api.groq.com/openai/v1';
+            this.groqHeaders = {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${options.groqApiKey}`
+            };
+        }
+
+        // OpenRouter / OpenAI Vision config (used for Better Quality vision model)
         if (options.openRouterApiKey) {
             this.visionApiKey = options.openRouterApiKey;
             this.visionBaseURL = 'https://openrouter.ai/api/v1';
@@ -164,8 +174,10 @@ class EnhancedPDFProcessor {
 
     // ─── Vision API (direct fetch, no SDK wrapper) ───
 
-    async callVisionAPI(base64Image, pageNum, modelOverride, provider = null) {
+    async callVisionAPI(base64Image, pageNum, modelOverride, useGroq = false) {
         const effectiveModel = modelOverride || this.visionModel;
+        const baseURL = useGroq ? this.groqBaseURL : this.visionBaseURL;
+        const headers = useGroq ? this.groqHeaders : this.visionHeaders;
         const body = {
             model: effectiveModel,
             messages: [{
@@ -184,9 +196,8 @@ class EnhancedPDFProcessor {
             max_tokens: 4000,
             include_reasoning: false
         };
-        if (provider) body.provider = provider;
 
-        this.logger.info(`[Vision] API call: model=${effectiveModel}, page=${pageNum}, imageSize=${Math.round(base64Image.length / 1024)}KB`);
+        this.logger.info(`[Vision] API call: model=${effectiveModel}, via=${useGroq ? 'Groq' : 'OpenRouter'}, page=${pageNum}, imageSize=${Math.round(base64Image.length / 1024)}KB`);
 
         // Retry with exponential backoff
         const maxRetries = 3;
@@ -194,9 +205,9 @@ class EnhancedPDFProcessor {
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 120000); // 2 min per page
             try {
-                const response = await fetch(`${this.visionBaseURL}/chat/completions`, {
+                const response = await fetch(`${baseURL}/chat/completions`, {
                     method: 'POST',
-                    headers: this.visionHeaders,
+                    headers,
                     body: JSON.stringify(body),
                     signal: controller.signal
                 });
@@ -250,8 +261,10 @@ class EnhancedPDFProcessor {
 
     // ─── AI Text Cleanup ───
 
-    async callTextAPI(text, systemPrompt, model, provider = null) {
+    async callTextAPI(text, systemPrompt, model, useGroq = false) {
         const effectiveModel = model || 'google/gemini-3.1-flash-lite-preview';
+        const baseURL = useGroq ? this.groqBaseURL : this.visionBaseURL;
+        const headers = useGroq ? this.groqHeaders : this.visionHeaders;
         const body = {
             model: effectiveModel,
             messages: [
@@ -260,18 +273,17 @@ class EnhancedPDFProcessor {
             ],
             max_tokens: 8000
         };
-        if (provider) body.provider = provider;
 
-        this.logger.info(`[TextAPI] Cleanup call: model=${effectiveModel}, textLen=${text.length}`);
+        this.logger.info(`[TextAPI] Cleanup call: model=${effectiveModel}, via=${useGroq ? 'Groq' : 'OpenRouter'}, textLen=${text.length}`);
 
         const maxRetries = 3;
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 120000);
             try {
-                const response = await fetch(`${this.visionBaseURL}/chat/completions`, {
+                const response = await fetch(`${baseURL}/chat/completions`, {
                     method: 'POST',
-                    headers: this.visionHeaders,
+                    headers,
                     body: JSON.stringify(body),
                     signal: controller.signal
                 });
@@ -320,7 +332,7 @@ class EnhancedPDFProcessor {
         }
     }
 
-    async aiCleanupText(text, model, provider = null) {
+    async aiCleanupText(text, model, useGroq = false) {
         const CHUNK_CHAR_LIMIT = 12000;
         const pagePattern = /---\s*PAGE\s+(?:BREAK|\d+)\s*---/g;
 
@@ -350,7 +362,7 @@ class EnhancedPDFProcessor {
 
         for (let i = 0; i < chunks.length; i++) {
             this.logger.info(`[AICleanup] Chunk ${i + 1}/${chunks.length} (${chunks[i].length} chars)`);
-            const result = await this.callTextAPI(chunks[i], CLEANUP_SYSTEM_PROMPT, model, provider);
+            const result = await this.callTextAPI(chunks[i], CLEANUP_SYSTEM_PROMPT, model, useGroq);
             cleanedChunks.push(result.text);
             totalPromptTokens += result.promptTokens;
             totalCompletionTokens += result.completionTokens;
@@ -532,7 +544,7 @@ class EnhancedPDFProcessor {
             // Method 3: Vision API
             if (!extractionResult && tryVision) {
                 try {
-                    extractionResult = await this.extractTextWithVision(filePath, options.model, options.modelProvider || null);
+                    extractionResult = await this.extractTextWithVision(filePath, options.model, !!options.useGroq);
                     result.extractionMethod = 'vision';
                     if (extractionResult.usage) {
                         result.usage = extractionResult.usage;
@@ -689,9 +701,12 @@ class EnhancedPDFProcessor {
         return { text: fullText, numpages: pageCount, method: 'ocr' };
     }
 
-    async extractTextWithVision(filePath, modelOverride, provider = null) {
-        if (!this.visionApiKey) {
+    async extractTextWithVision(filePath, modelOverride, useGroq = false) {
+        if (!useGroq && !this.visionApiKey) {
             throw new Error('Vision API not configured');
+        }
+        if (useGroq && !this.groqApiKey) {
+            throw new Error('Groq API not configured');
         }
 
         const effectiveModel = modelOverride || this.visionModel;
@@ -721,7 +736,7 @@ class EnhancedPDFProcessor {
                 const base64Image = buffer.toString('base64');
                 this.logger.info(`[Vision] Sending page ${page}/${images.length} (${Math.round(base64Image.length / 1024)}KB)`);
 
-                const result = await this.callVisionAPI(base64Image, page, modelOverride, provider);
+                const result = await this.callVisionAPI(base64Image, page, modelOverride, useGroq);
 
                 totalPromptTokens += result.promptTokens;
                 totalCompletionTokens += result.completionTokens;
