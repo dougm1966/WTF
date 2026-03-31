@@ -24,8 +24,11 @@ const AVAILABLE_MODELS = [
     { id: 'google/gemini-3.1-flash-lite-preview',      name: 'Better Quality', inputPerMillion: 0.25,  outputPerMillion: 1.50, useGroq: false },
 ];
 
-const CLEANUP_MODEL = 'llama-3.3-70b-versatile';
-const CLEANUP_PRICING = { inputPerMillion: 0.12, outputPerMillion: 0.12 };
+const CLEANUP_MODELS = [
+    { id: 'llama-3.3-70b-versatile',             name: 'Fast',           inputPerMillion: 0.12, outputPerMillion: 0.12, useGroq: true  },
+    { id: 'google/gemini-3.1-flash-lite-preview', name: 'Better Quality', inputPerMillion: 0.10, outputPerMillion: 0.40, useGroq: false },
+];
+const CLEANUP_MODEL = CLEANUP_MODELS[0].id;
 
 function getModelPricing(modelId) {
     return AVAILABLE_MODELS.find(m => m.id === modelId) || AVAILABLE_MODELS[0];
@@ -399,7 +402,7 @@ app.get('/api/history/export', async (req, res) => {
 // Single-file cleanup
 app.post('/api/cleanup', express.json(), async (req, res) => {
     try {
-        const { filename, originalName } = req.body;
+        const { filename, originalName, cleanupModel: requestedModel } = req.body;
         if (!filename) {
             return res.status(400).json({ error: 'Missing filename' });
         }
@@ -409,15 +412,16 @@ app.post('/api/cleanup', express.json(), async (req, res) => {
             return res.status(404).json({ error: 'Text file not found' });
         }
 
+        const cleanupModelConfig = CLEANUP_MODELS.find(m => m.id === requestedModel) || CLEANUP_MODELS[0];
         const rawText = await fs.promises.readFile(rawPath, 'utf8');
-        const cleanup = await pdfProcessor.aiCleanupText(rawText, CLEANUP_MODEL, !!process.env.GROQ_API_KEY);
+        const cleanup = await pdfProcessor.aiCleanupText(rawText, cleanupModelConfig.id, cleanupModelConfig.useGroq);
 
         const cleanFilename = filename.replace(/\.txt$/, '.clean.txt');
         const cleanPath = path.join('uploads/texts', cleanFilename);
         await fs.promises.writeFile(cleanPath, cleanup.text, 'utf8');
 
-        const cleanupCost = (cleanup.usage.promptTokens * CLEANUP_PRICING.inputPerMillion
-            + cleanup.usage.completionTokens * CLEANUP_PRICING.outputPerMillion) / 1_000_000;
+        const cleanupCost = (cleanup.usage.promptTokens * cleanupModelConfig.inputPerMillion
+            + cleanup.usage.completionTokens * cleanupModelConfig.outputPerMillion) / 1_000_000;
 
         // Update history entry with cleanup cost
         const entry = history.findByTextFilename(filename);
@@ -445,16 +449,19 @@ app.post('/api/cleanup', express.json(), async (req, res) => {
 // Batch cleanup — creates a job for polling
 app.post('/api/cleanup-batch', express.json(), async (req, res) => {
     try {
-        const { files } = req.body;
+        const { files, cleanupModel: requestedModel } = req.body;
         if (!files || !files.length) {
             return res.status(400).json({ error: 'No files provided' });
         }
+
+        const cleanupModelConfig = CLEANUP_MODELS.find(m => m.id === requestedModel) || CLEANUP_MODELS[0];
 
         const jobId = uuidv4();
         const job = {
             id: jobId,
             type: 'cleanup',
             files: files,
+            cleanupModelConfig,
             status: 'processing',
             progress: 0,
             completed: 0,
@@ -481,14 +488,15 @@ app.post('/api/cleanup-batch', express.json(), async (req, res) => {
                         }
 
                         const rawText = await fs.promises.readFile(rawPath, 'utf8');
-                        const cleanup = await pdfProcessor.aiCleanupText(rawText, CLEANUP_MODEL, !!process.env.GROQ_API_KEY);
+                        const batchModel = job.cleanupModelConfig || CLEANUP_MODELS[0];
+                        const cleanup = await pdfProcessor.aiCleanupText(rawText, batchModel.id, batchModel.useGroq);
 
                         const cleanFilename = file.filename.replace(/\.txt$/, '.clean.txt');
                         const cleanPath = path.join('uploads/texts', cleanFilename);
                         await fs.promises.writeFile(cleanPath, cleanup.text, 'utf8');
 
-                        const cleanupCost = (cleanup.usage.promptTokens * CLEANUP_PRICING.inputPerMillion
-                            + cleanup.usage.completionTokens * CLEANUP_PRICING.outputPerMillion) / 1_000_000;
+                        const cleanupCost = (cleanup.usage.promptTokens * batchModel.inputPerMillion
+                            + cleanup.usage.completionTokens * batchModel.outputPerMillion) / 1_000_000;
 
                         // Update history
                         const entry = history.findByTextFilename(file.filename);
@@ -543,8 +551,9 @@ app.get('/api/config', (req, res) => {
     res.json({
         models: AVAILABLE_MODELS,
         defaultModel: AVAILABLE_MODELS[0].id,
-        cleanupModel: CLEANUP_MODEL,
-        cleanupAvailable: !!process.env.OPENROUTER_API_KEY
+        cleanupModels: CLEANUP_MODELS,
+        defaultCleanupModel: CLEANUP_MODELS[0].id,
+        cleanupAvailable: !!(process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY)
     });
 });
 

@@ -114,6 +114,7 @@ class PDFConverter {
         this.previewMode = 'cleaned'; // 'raw' or 'cleaned'
         this.availableModels = [];
         this.selectedModel = 'meta-llama/llama-4-scout-17b-16e-instruct';
+        this.selectedCleanupModel = 'llama-3.3-70b-versatile';
         this.usageTracker = new UsageTracker();
         this.sessionPersistence = new SessionPersistence();
 
@@ -743,6 +744,7 @@ class PDFConverter {
             groupStatus: this.groupStatus,
             convertedMap: this.convertedMap, // SessionPersistence.save() handles Map→entries
             selectedModel: this.selectedModel,
+            selectedCleanupModel: this.selectedCleanupModel,
             aiCleanup: this.aiCleanupToggle ? this.aiCleanupToggle.checked : false
         });
     }
@@ -772,6 +774,7 @@ class PDFConverter {
         this.groupStatus = session.groupStatus || {};
         this.convertedMap = new Map(session.convertedMap || []);
         if (session.selectedModel) this.selectedModel = session.selectedModel;
+        if (session.selectedCleanupModel) this.selectedCleanupModel = session.selectedCleanupModel;
         if (session.aiCleanup && this.aiCleanupToggle) this.aiCleanupToggle.checked = true;
 
         // Switch to working view and render
@@ -911,7 +914,7 @@ class PDFConverter {
             const res = await fetch('/api/cleanup', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ filename: textFilename, originalName })
+                body: JSON.stringify({ filename: textFilename, originalName, cleanupModel: this.selectedCleanupModel })
             });
             if (!res.ok) throw new Error(`Cleanup failed: ${res.statusText}`);
 
@@ -988,7 +991,7 @@ class PDFConverter {
             const res = await fetch('/api/cleanup-batch', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ files: filesToClean })
+                body: JSON.stringify({ files: filesToClean, cleanupModel: this.selectedCleanupModel })
             });
             if (!res.ok) throw new Error(`Batch cleanup failed: ${res.statusText}`);
 
@@ -1104,6 +1107,23 @@ class PDFConverter {
                 select.value = this.selectedModel;
                 select.addEventListener('change', () => {
                     this.selectedModel = select.value;
+                });
+            }
+
+            const cleanupModels = cfg.cleanupModels || [];
+            const cleanupSelect = document.getElementById('cleanupModelSelect');
+            if (cleanupSelect && cleanupModels.length) {
+                cleanupSelect.innerHTML = '';
+                cleanupModels.forEach(m => {
+                    const opt = document.createElement('option');
+                    opt.value = m.id;
+                    opt.textContent = `${m.name}  —  $${m.inputPerMillion}/1M in · $${m.outputPerMillion}/1M out`;
+                    cleanupSelect.appendChild(opt);
+                });
+                if (!this.classificationId) this.selectedCleanupModel = cfg.defaultCleanupModel || cleanupModels[0]?.id;
+                cleanupSelect.value = this.selectedCleanupModel;
+                cleanupSelect.addEventListener('change', () => {
+                    this.selectedCleanupModel = cleanupSelect.value;
                 });
             }
         } catch (e) { /* use default */ }
