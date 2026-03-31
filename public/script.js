@@ -114,7 +114,6 @@ class PDFConverter {
         this.previewMode = 'cleaned'; // 'raw' or 'cleaned'
         this.availableModels = [];
         this.selectedModel = 'meta-llama/llama-4-scout-17b-16e-instruct';
-        this.selectedCleanupModel = 'llama-3.3-70b-versatile';
         this.usageTracker = new UsageTracker();
         this.sessionPersistence = new SessionPersistence();
 
@@ -400,12 +399,9 @@ class PDFConverter {
                 // Build per-file action buttons
                 let actionsHtml = '';
                 if (converted && converted.status === 'success') {
-                    // Cleanup / Reclean / Cleaning... button
-                    const needsReclean = converted.cleanTextFile && converted.lastCleanupModel !== this.selectedCleanupModel;
+                    // Cleanup / Cleaning... button
                     if (converted.cleanupStatus === 'cleaning') {
                         actionsHtml += `<button class="file-action-btn cleaning-btn" disabled><i class="fas fa-spinner"></i> Cleaning...</button>`;
-                    } else if (needsReclean) {
-                        actionsHtml += `<button class="file-action-btn reclean-btn" data-file="${file.originalName}" data-textfile="${converted.textFile}"><i class="fas fa-rotate"></i> Reclean</button>`;
                     } else if (!converted.cleanTextFile) {
                         actionsHtml += `<button class="file-action-btn cleanup-btn" data-file="${file.originalName}" data-textfile="${converted.textFile}"><i class="fas fa-sparkles"></i> Cleanup</button>`;
                     }
@@ -505,8 +501,8 @@ class PDFConverter {
             });
         });
 
-        // Per-file cleanup / reclean buttons
-        this.fileList.querySelectorAll('.file-action-btn.cleanup-btn:not(:disabled), .file-action-btn.reclean-btn').forEach(btn => {
+        // Per-file cleanup buttons
+        this.fileList.querySelectorAll('.file-action-btn.cleanup-btn:not(:disabled)').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 this.cleanupFile(btn.dataset.textfile, btn.dataset.file);
@@ -747,7 +743,6 @@ class PDFConverter {
             groupStatus: this.groupStatus,
             convertedMap: this.convertedMap, // SessionPersistence.save() handles Map→entries
             selectedModel: this.selectedModel,
-            selectedCleanupModel: this.selectedCleanupModel,
             aiCleanup: this.aiCleanupToggle ? this.aiCleanupToggle.checked : false
         });
     }
@@ -777,7 +772,6 @@ class PDFConverter {
         this.groupStatus = session.groupStatus || {};
         this.convertedMap = new Map(session.convertedMap || []);
         if (session.selectedModel) this.selectedModel = session.selectedModel;
-        if (session.selectedCleanupModel) this.selectedCleanupModel = session.selectedCleanupModel;
         if (session.aiCleanup && this.aiCleanupToggle) this.aiCleanupToggle.checked = true;
 
         // Switch to working view and render
@@ -917,7 +911,7 @@ class PDFConverter {
             const res = await fetch('/api/cleanup', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ filename: textFilename, originalName, cleanupModel: this.selectedCleanupModel })
+                body: JSON.stringify({ filename: textFilename, originalName })
             });
             if (!res.ok) throw new Error(`Cleanup failed: ${res.statusText}`);
 
@@ -995,7 +989,7 @@ class PDFConverter {
             const res = await fetch('/api/cleanup-batch', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ files: filesToClean, cleanupModel: this.selectedCleanupModel })
+                body: JSON.stringify({ files: filesToClean })
             });
             if (!res.ok) throw new Error(`Batch cleanup failed: ${res.statusText}`);
 
@@ -1029,7 +1023,7 @@ class PDFConverter {
                             if (entry) {
                                 entry.cleanTextFile = r.cleanTextFile;
                                 entry.cleanupStatus = null;
-                                entry.lastCleanupModel = this.selectedCleanupModel;
+            
                                 entry.cost = (entry.cost || 0) + (r.cost || 0);
                                 totalCleanupCost += r.cost || 0;
                             }
@@ -1115,23 +1109,6 @@ class PDFConverter {
                 });
             }
 
-            const cleanupModels = cfg.cleanupModels || [];
-            const cleanupSelect = document.getElementById('cleanupModelSelect');
-            if (cleanupSelect && cleanupModels.length) {
-                cleanupSelect.innerHTML = '';
-                cleanupModels.forEach(m => {
-                    const opt = document.createElement('option');
-                    opt.value = m.id;
-                    opt.textContent = `${m.name}  —  $${m.inputPerMillion}/1M in · $${m.outputPerMillion}/1M out`;
-                    cleanupSelect.appendChild(opt);
-                });
-                if (!this.classificationId) this.selectedCleanupModel = cfg.defaultCleanupModel || cleanupModels[0]?.id;
-                cleanupSelect.value = this.selectedCleanupModel;
-                cleanupSelect.addEventListener('change', () => {
-                    this.selectedCleanupModel = cleanupSelect.value;
-                    this.renderGroupedFileList();
-                });
-            }
         } catch (e) { /* use default */ }
     }
 
