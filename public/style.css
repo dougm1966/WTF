@@ -500,6 +500,17 @@ body {
     border-color: transparent;
 }
 
+.file-action-btn.reclean-btn {
+    border-color: #b8d4f0;
+    color: #2c6fa8;
+    background: #f4f8ff;
+}
+.file-action-btn.reclean-btn:hover {
+    background: linear-gradient(135deg, #3a8fd1, #2c6fa8);
+    color: white;
+    border-color: transparent;
+}
+
 .file-action-btn.cleaning-btn {
     border-color: #d0c4ea;
     color: #764ba2;

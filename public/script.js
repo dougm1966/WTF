@@ -400,11 +400,14 @@ class PDFConverter {
                 // Build per-file action buttons
                 let actionsHtml = '';
                 if (converted && converted.status === 'success') {
-                    // Cleanup button: active if converted but not cleaned and not currently cleaning
-                    if (!converted.cleanTextFile && converted.cleanupStatus !== 'cleaning') {
-                        actionsHtml += `<button class="file-action-btn cleanup-btn" data-file="${file.originalName}" data-textfile="${converted.textFile}"><i class="fas fa-sparkles"></i> Cleanup</button>`;
-                    } else if (converted.cleanupStatus === 'cleaning') {
+                    // Cleanup / Reclean / Cleaning... button
+                    const needsReclean = converted.cleanTextFile && converted.lastCleanupModel && converted.lastCleanupModel !== this.selectedCleanupModel;
+                    if (converted.cleanupStatus === 'cleaning') {
                         actionsHtml += `<button class="file-action-btn cleaning-btn" disabled><i class="fas fa-spinner"></i> Cleaning...</button>`;
+                    } else if (needsReclean) {
+                        actionsHtml += `<button class="file-action-btn reclean-btn" data-file="${file.originalName}" data-textfile="${converted.textFile}"><i class="fas fa-rotate"></i> Reclean</button>`;
+                    } else if (!converted.cleanTextFile) {
+                        actionsHtml += `<button class="file-action-btn cleanup-btn" data-file="${file.originalName}" data-textfile="${converted.textFile}"><i class="fas fa-sparkles"></i> Cleanup</button>`;
                     }
                     // Download button — show text label for cleaned files
                     const dlFile = converted.cleanTextFile || converted.textFile;
@@ -502,8 +505,8 @@ class PDFConverter {
             });
         });
 
-        // Per-file cleanup buttons
-        this.fileList.querySelectorAll('.file-action-btn.cleanup-btn:not(:disabled)').forEach(btn => {
+        // Per-file cleanup / reclean buttons
+        this.fileList.querySelectorAll('.file-action-btn.cleanup-btn:not(:disabled), .file-action-btn.reclean-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 this.cleanupFile(btn.dataset.textfile, btn.dataset.file);
@@ -921,6 +924,7 @@ class PDFConverter {
             const data = await res.json();
             entry.cleanTextFile = data.cleanTextFile;
             entry.cleanupStatus = null;
+            entry.lastCleanupModel = this.selectedCleanupModel;
             entry.cost = (entry.cost || 0) + (data.cost || 0);
 
             // Track usage
@@ -1025,6 +1029,7 @@ class PDFConverter {
                             if (entry) {
                                 entry.cleanTextFile = r.cleanTextFile;
                                 entry.cleanupStatus = null;
+                                entry.lastCleanupModel = this.selectedCleanupModel;
                                 entry.cost = (entry.cost || 0) + (r.cost || 0);
                                 totalCleanupCost += r.cost || 0;
                             }
@@ -1124,6 +1129,7 @@ class PDFConverter {
                 cleanupSelect.value = this.selectedCleanupModel;
                 cleanupSelect.addEventListener('change', () => {
                     this.selectedCleanupModel = cleanupSelect.value;
+                    this.renderGroupedFileList();
                 });
             }
         } catch (e) { /* use default */ }
