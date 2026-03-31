@@ -193,9 +193,9 @@ class EnhancedPDFProcessor {
                     }
                 ]
             }],
-            max_tokens: 4000,
-            include_reasoning: false
+            max_tokens: 4000
         };
+        if (!useGroq) body.include_reasoning = false; // Gemini thinking-mode guard (Groq rejects this param)
 
         this.logger.info(`[Vision] API call: model=${effectiveModel}, via=${useGroq ? 'Groq' : 'OpenRouter'}, page=${pageNum}, imageSize=${Math.round(base64Image.length / 1024)}KB`);
 
