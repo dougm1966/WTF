@@ -294,6 +294,11 @@ class PDFConverter {
                 }
                 this.serverFileMap[file.originalName] = file;
                 this.classifiedFiles[file.classification].push(file);
+
+                // If this group was previously 'done', reset to 'idle' so Convert button reappears
+                if (this.groupStatus[file.classification] === 'done') {
+                    this.groupStatus[file.classification] = 'idle';
+                }
             }
 
             this.renderGroupedFileList();
@@ -690,12 +695,24 @@ class PDFConverter {
     }
 
     async downloadAllFiles() {
-        // Find any completed job to download from
-        const completedJobId = Object.values(this.groupJobs).find(id => id);
-        if (!completedJobId) { this.notify('No files to download', 'error'); return; }
+        const fileList = [];
+        for (const [originalName, entry] of this.convertedMap) {
+            if (entry.status === 'success' && entry.textFile) {
+                fileList.push({
+                    originalName,
+                    textFile: entry.textFile,
+                    cleanTextFile: entry.cleanTextFile || null
+                });
+            }
+        }
+        if (!fileList.length) { this.notify('No files to download', 'error'); return; }
 
         try {
-            const res = await fetch(`/api/download/batch/${completedJobId}`);
+            const res = await fetch('/api/download/batch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ files: fileList })
+            });
             if (!res.ok) throw new Error('Download failed');
             const blob = await res.blob();
             const url = URL.createObjectURL(blob);

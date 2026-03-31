@@ -347,6 +347,36 @@ app.get('/api/download/batch/:jobId', async (req, res) => {
     }
 });
 
+// Download a custom list of files as ZIP (used by frontend to span multiple group jobs)
+app.post('/api/download/batch', async (req, res) => {
+    const { files } = req.body;
+    if (!files || !files.length) {
+        return res.status(400).json({ error: 'No files provided' });
+    }
+
+    try {
+        const archive = archiver('zip', { zlib: { level: 9 } });
+        res.attachment(`converted-${Date.now()}.zip`);
+        archive.pipe(res);
+
+        for (const file of files) {
+            // Prefer the cleaned version; fall back to raw
+            const preferredFile = file.cleanTextFile || file.textFile;
+            const filePath = path.join('uploads/texts', preferredFile);
+            if (fs.existsSync(filePath)) {
+                const ext = file.cleanTextFile ? '.clean.txt' : '.txt';
+                const archiveName = file.originalName.replace(/\.pdf$/i, ext);
+                archive.file(filePath, { name: archiveName });
+            }
+        }
+
+        archive.finalize();
+    } catch (error) {
+        logger.error('Batch download error:', error);
+        res.status(500).json({ error: 'Batch download failed' });
+    }
+});
+
 // Clean up job files
 app.delete('/api/cleanup/:jobId', (req, res) => {
     const jobId = req.params.jobId;
