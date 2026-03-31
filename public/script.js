@@ -401,7 +401,7 @@ class PDFConverter {
                 let actionsHtml = '';
                 if (converted && converted.status === 'success') {
                     // Cleanup / Reclean / Cleaning... button
-                    const needsReclean = converted.cleanTextFile && converted.lastCleanupModel && converted.lastCleanupModel !== this.selectedCleanupModel;
+                    const needsReclean = converted.cleanTextFile && converted.lastCleanupModel !== this.selectedCleanupModel;
                     if (converted.cleanupStatus === 'cleaning') {
                         actionsHtml += `<button class="file-action-btn cleaning-btn" disabled><i class="fas fa-spinner"></i> Cleaning...</button>`;
                     } else if (needsReclean) {
